@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+:root {
+  --font-sans: var(--font-poppins), system-ui, sans-serif;
+  --background: #ffffff;
+  --foreground: #0f172a;
+  
+  /* Primary Royal Blue Palette */
+  --primary: #1d4ed8; /* Royal Blue */
+  --primary-hover: #1e3a8a; /* Deep Navy */
+  --primary-foreground: #ffffff;
+  
+  /* Neutral Slate Surfaces & Borders */
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --muted: #f8fafc;
+  --muted-foreground: #64748b;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #1d4ed8;
+
+  /* Semantic Accents */
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+
+  /* Geometry: Strictly 4px */
+  --radius: 0.25rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --font-sans: var(--font-sans);
+  --radius-sm: 0.25rem;
+  --radius-md: 0.25rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.25rem;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+/* Print styles for thermal receipts and A4 report cards */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

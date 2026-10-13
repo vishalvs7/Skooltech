@@ -1,0 +1,162 @@
+import type {
+  INotificationService,
+  EmailMessage,
+  SmsMessage,
+  NotificationResult,
+} from "./types";
+import { MockNotificationService } from "./mock";
+
+export class BrevoNotificationService implements INotificationService {
+  name = "BrevoNotificationService";
+  private apiKey: string;
+  private fallbackMock: MockNotificationService;
+
+  constructor(apiKey?: string) {
+    this.apiKey = apiKey || process.env.BREVO_API_KEY || "";
+    this.fallbackMock = new MockNotificationService();
+  }
+
+  async sendEmail(message: EmailMessage): Promise<NotificationResult> {
+    if (!this.apiKey) {
+      console.warn("⚠️ [BrevoNotificationService] BREVO_API_KEY not configured. Falling back to Mock service.");
+      return this.fallbackMock.sendEmail(message);
+    }
+
+    try {
+      const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          sender: {
+            name: message.fromName || "Skooltech Notifications",
+            email: message.fromEmail || "no-reply@skooltech.in",
+          },
+          to: [{ email: message.to, name: message.toName || message.to }],
+          subject: message.subject,
+          htmlContent: message.htmlContent,
+          textContent: message.textContent,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("Brevo API Email Error:", errorData);
+        return { success: false, error: errorData.message || "Brevo dispatch failed." };
+      }
+
+      const data = await response.json();
+      return { success: true, messageId: data.messageId };
+    } catch (error) {
+      console.error("Brevo Network Error:", error);
+      return { success: false, error: "Network error communicating with Brevo." };
+    }
+  }
+
+  async sendSms(message: SmsMessage): Promise<NotificationResult> {
+    if (!this.apiKey) {
+      console.warn("⚠️ [BrevoNotificationService] BREVO_API_KEY not configured. Falling back to Mock service.");
+      return this.fallbackMock.sendSms(message);
+    }
+
+    try {
+      const response = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          sender: message.senderId || "SKOOLT",
+          recipient: message.phone,
+          content: message.content,
+          type: "transactional",
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("Brevo SMS API Error:", errorData);
+        return { success: false, error: errorData.message || "Brevo SMS dispatch failed." };
+      }
+
+      const data = await response.json();
+      return { success: true, messageId: data.messageId?.toString() };
+    } catch (error) {
+      console.error("Brevo SMS Network Error:", error);
+      return { success: false, error: "Network error sending SMS via Brevo." };
+    }
+  }
+
+  async sendFeeReceiptAlert(params: {
+    parentEmail?: string;
+    parentPhone?: string;
+    studentName: string;
+    admissionNo: string;
+    receiptNo: string;
+    amountPaid: number;
+    paymentMethod: string;
+  }): Promise<NotificationResult> {
+    const formattedAmount = new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: 0,
+    }).format(params.amountPaid);
+
+    if (params.parentEmail) {
+      await this.sendEmail({
+        to: params.parentEmail,
+        subject: `Fee Payment Receipt ${params.receiptNo} - ${params.studentName}`,
+        htmlContent: `<div style="font-family: sans-serif; max-width: 600px;">
+          <h2 style="color: #1D4ED8;">Payment Receipt Confirmation</h2>
+          <p>Dear Parent,</p>
+          <p>We acknowledge receipt of <strong>${formattedAmount}</strong> towards school fees for <strong>${params.studentName}</strong> (${params.admissionNo}).</p>
+          <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+            <tr><td style="padding: 6px; border: 1px solid #e2e8f0;">Receipt Number:</td><td style="padding: 6px; border: 1px solid #e2e8f0; font-weight: bold;">${params.receiptNo}</td></tr>
+            <tr><td style="padding: 6px; border: 1px solid #e2e8f0;">Mode:</td><td style="padding: 6px; border: 1px solid #e2e8f0;">${params.paymentMethod}</td></tr>
+            <tr><td style="padding: 6px; border: 1px solid #e2e8f0;">Amount:</td><td style="padding: 6px; border: 1px solid #e2e8f0; font-weight: bold; color: #047857;">${formattedAmount}</td></tr>
+          </table>
+          <p style="font-size: 12px; color: #64748b; margin-top: 20px;">This is an automated system confirmation generated by Skooltech SaaS.</p>
+        </div>`,
+        textContent: `Receipt ${params.receiptNo}: Fee payment of ${formattedAmount} received for ${params.studentName}.`,
+      });
+    }
+
+    if (params.parentPhone) {
+      await this.sendSms({
+        phone: params.parentPhone,
+        content: `Receipt ${params.receiptNo}: Fee payment of ${formattedAmount} for ${params.studentName} received via ${params.paymentMethod}. - Skooltech`,
+      });
+    }
+
+    return { success: true, messageId: `brevo_fee_${params.receiptNo}` };
+  }
+
+  async sendAbsenceAlert(params: {
+    parentPhone?: string;
+    parentEmail?: string;
+    studentName: string;
+    className: string;
+    date: string;
+  }): Promise<NotificationResult> {
+    const text = `Dear Parent, ${params.studentName} (${params.className}) has been marked ABSENT on ${params.date}. Please submit a medical slip or contact the class teacher if unwell.`;
+
+    if (params.parentPhone) {
+      await this.sendSms({ phone: params.parentPhone, content: text });
+    }
+
+    if (params.parentEmail) {
+      await this.sendEmail({
+        to: params.parentEmail,
+        subject: `Absence Notice: ${params.studentName} on ${params.date}`,
+        htmlContent: `<p>${text}</p>`,
+      });
+    }
+
+    return { success: true, messageId: `brevo_absent_${Date.now()}` };
+  }
+}

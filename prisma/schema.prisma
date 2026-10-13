@@ -1,0 +1,431 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// =============================================================================
+// MODULE 1: TENANT CORE & ACADEMIC SESSIONS
+// =============================================================================
+
+model School {
+  id             String   @id @default(uuid())
+  code           String   @unique // e.g. "DPS01", "DEMO01"
+  slug           String   @unique // e.g. "greenwood-demo" for subdomains
+  name           String
+  affiliationNo  String?  // CBSE / ICSE / State Board Code
+  address        String?
+  phone          String?
+  email          String?
+  logoUrl        String?
+  currency       String   @default("INR")
+  gradingScale   String   @default("PERCENTAGE") // "PERCENTAGE", "CGPA_10", "CGPA_5"
+
+  // BYOG (Bring Your Own Gateway) Configuration
+  paymentGateway String?  // "RAZORPAY", "CASHFREE", or "MOCK"
+  paymentKeyId   String?  // BYOG Merchant Key ID
+  paymentSecret  String?  // Encrypted BYOG Merchant Secret
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  users               User[]
+  sessions            AcademicSession[]
+  classes             Class[]
+  feeStructures       FeeStructure[]
+  feeInvoices         FeeInvoice[]
+  paymentTransactions PaymentTransaction[]
+  exams               Exam[]
+  examResults         ExamResult[]
+  attendanceRecords   Attendance[]
+  biometricPunches    BiometricPunch[]
+  leaveApplications   LeaveApplication[]
+  notices             Notice[]
+  auditLogs           AuditLog[]
+
+  @@map("schools")
+}
+
+model AcademicSession {
+  id        String   @id @default(uuid())
+  schoolId  String
+  name      String   // e.g. "2026-2027"
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  isCurrent Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  school      School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  enrollments Enrollment[]
+
+  @@unique([schoolId, name])
+  @@index([schoolId, isCurrent])
+  @@map("academic_sessions")
+}
+
+// =============================================================================
+// MODULE 2: AUTHENTICATION & RBAC
+// =============================================================================
+
+enum UserRole {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  PRINCIPAL
+  ACCOUNTS
+  TEACHER
+  STUDENT
+}
+
+model User {
+  id                 String   @id @default(uuid())
+  schoolId           String
+  username           String
+  passwordHash       String
+  role               UserRole
+  email              String?
+  phone              String?
+  mustChangePassword Boolean  @default(true)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  school             School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacherProfile     Teacher?
+  studentProfile     Student?
+  markedAttendance   Attendance[]        @relation("AttendanceMarkedBy")
+  collectedPayments  PaymentTransaction[] @relation("PaymentsCollectedBy")
+  createdExams       Exam[]              @relation("ExamsCreatedBy")
+  reviewedLeaves     LeaveApplication[]  @relation("LeavesReviewedBy")
+  createdNotices     Notice[]            @relation("NoticesCreatedBy")
+  auditLogs          AuditLog[]
+  biometricMatches   BiometricPunch[]
+
+  @@unique([schoolId, username])
+  @@index([schoolId, role])
+  @@map("users")
+}
+
+model Teacher {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  fullName     String
+  employeeId   String?
+  designation  String?  // e.g. "Senior PGT Mathematics"
+  createdAt    DateTime @default(now())
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  managedSection Section? @relation("ClassTeacherSection")
+
+  @@map("teachers")
+}
+
+// =============================================================================
+// MODULE 3: ACADEMIC STRUCTURE (CLASSES & SECTIONS)
+// =============================================================================
+
+model Class {
+  id           String    @id @default(uuid())
+  schoolId     String
+  name         String    // e.g. "Class 5", "Class 10"
+  numericOrder Int       @default(0)
+
+  school       School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  sections     Section[]
+
+  @@unique([schoolId, name])
+  @@map("classes")
+}
+
+model Section {
+  id             String   @id @default(uuid())
+  classId        String
+  name           String   // e.g. "A", "B"
+  classTeacherId String?  @unique
+
+  class        Class        @relation(fields: [classId], references: [id], onDelete: Cascade)
+  classTeacher Teacher?     @relation("ClassTeacherSection", fields: [classTeacherId], references: [id])
+  enrollments  Enrollment[]
+
+  @@unique([classId, name])
+  @@map("sections")
+}
+
+// =============================================================================
+// MODULE 4: STUDENT IDENTITY & YEARLY ENROLLMENT
+// =============================================================================
+
+enum StudentStatus {
+  PENDING_ACADEMIC // Step 1: Admin created profile
+  PENDING_FEE      // Step 2: Teacher assigned class
+  ACTIVE           // Step 3: Accounts assigned fee structure
+  ALUMNI           // Rollover / Graduated
+  WITHDRAWN        // Left school
+}
+
+model Student {
+  id          String        @id @default(uuid())
+  userId      String        @unique
+  schoolId    String
+  admissionNo String        // Immutable per school, e.g. "ADM-1001"
+  fullName    String
+  dob         DateTime?     @db.Date
+  gender      String?
+  parentName  String?
+  parentPhone String?
+  parentEmail String?
+  status      StudentStatus @default(PENDING_ACADEMIC)
+  createdAt   DateTime      @default(now())
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  enrollments Enrollment[]
+  feeInvoices FeeInvoice[]
+  leaves      LeaveApplication[]
+
+  @@unique([schoolId, admissionNo])
+  @@index([schoolId, status])
+  @@map("students")
+}
+
+model Enrollment {
+  id        String   @id @default(uuid())
+  studentId String
+  sessionId String
+  sectionId String
+  rollNo    String?
+  createdAt DateTime @default(now())
+
+  student     Student         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  session     AcademicSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  section     Section         @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  attendance  Attendance[]
+  examResults ExamResult[]
+
+  @@unique([studentId, sessionId])
+  @@index([sessionId, sectionId])
+  @@map("enrollments")
+}
+
+// =============================================================================
+// MODULE 5: DAILY ATTENDANCE & BIOMETRIC AUDIT
+// =============================================================================
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+model Attendance {
+  id           String           @id @default(uuid())
+  schoolId     String
+  enrollmentId String
+  date         DateTime         @db.Date
+  status       AttendanceStatus @default(PRESENT)
+  remarks      String?
+  markedById   String
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  markedBy   User       @relation("AttendanceMarkedBy", fields: [markedById], references: [id])
+
+  @@unique([enrollmentId, date])
+  @@index([schoolId, date])
+  @@map("attendance")
+}
+
+model BiometricPunch {
+  id            String   @id @default(uuid())
+  schoolId      String
+  deviceUserId  String   // Card or Fingerprint ID
+  matchedUserId String?
+  punchTime     DateTime
+  deviceName    String?  // e.g. "Main Gate Terminal"
+  createdAt     DateTime @default(now())
+
+  school      School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  matchedUser User?  @relation(fields: [matchedUserId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, punchTime])
+  @@map("biometric_punches")
+}
+
+// =============================================================================
+// MODULE 6: FINANCIALS, FEE SCHEDULES & COUNTER PAYMENTS (INR)
+// =============================================================================
+
+enum FeeBillingCycle {
+  MONTHLY
+  QUARTERLY
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  BANK_DRAFT
+}
+
+model FeeStructure {
+  id            String          @id @default(uuid())
+  schoolId      String
+  name          String          // e.g. "Primary Standard Fee"
+  cycle         FeeBillingCycle @default(MONTHLY)
+  amount        Decimal         @db.Decimal(10, 2)
+  lateFeePerDay Decimal         @default(10.00) @db.Decimal(10, 2)
+  lateFeeCap    Decimal         @default(500.00) @db.Decimal(10, 2)
+  graceDays     Int             @default(5)
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@map("fee_structures")
+}
+
+model FeeInvoice {
+  id         String   @id @default(uuid())
+  schoolId   String
+  studentId  String
+  title      String   // e.g. "Quarter 1 (April-June) Fee"
+  baseAmount Decimal  @db.Decimal(10, 2)
+  dueDate    DateTime @db.Date
+  paidAmount Decimal  @default(0.00) @db.Decimal(10, 2)
+  isPaid     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  school       School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student      Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  transactions PaymentTransaction[]
+
+  @@index([schoolId, isPaid])
+  @@index([studentId, isPaid])
+  @@map("fee_invoices")
+}
+
+model PaymentTransaction {
+  id             String        @id @default(uuid())
+  schoolId       String
+  invoiceId      String
+  receiptNo      String        @unique // e.g. "RCP-2026-0001"
+  amountPaid     Decimal       @db.Decimal(10, 2)
+  lateFeeCharged Decimal       @default(0.00) @db.Decimal(10, 2)
+  paymentMethod  PaymentMethod
+  referenceNo    String?       // UPI UTR or Draft Number
+  bankName       String?       // For Bank Drafts
+  collectedById  String
+  notes          String?
+  createdAt      DateTime      @default(now())
+
+  school      School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  invoice     FeeInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  collectedBy User       @relation("PaymentsCollectedBy", fields: [collectedById], references: [id])
+
+  @@index([schoolId, createdAt])
+  @@map("payment_transactions")
+}
+
+// =============================================================================
+// MODULE 7: EXAMINATIONS & GRADING
+// =============================================================================
+
+model Exam {
+  id          String    @id @default(uuid())
+  schoolId    String
+  name        String    // e.g. "Periodic Test 1 (PT-1)"
+  examType    String    // "UNIT_TEST", "MID_TERM", "FINAL", "CLASS_TEST"
+  startDate   DateTime? @db.Date
+  createdById String
+  createdAt   DateTime  @default(now())
+
+  school    School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy User         @relation("ExamsCreatedBy", fields: [createdById], references: [id])
+  results   ExamResult[]
+
+  @@map("exams")
+}
+
+model ExamResult {
+  id            String   @id @default(uuid())
+  schoolId      String
+  examId        String
+  enrollmentId  String
+  subject       String   // e.g. "Mathematics", "Science"
+  totalMarks    Decimal  @db.Decimal(5, 2)
+  obtainedMarks Decimal  @db.Decimal(5, 2)
+  remarks       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  exam       Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@unique([examId, enrollmentId, subject])
+  @@index([schoolId, examId])
+  @@map("exam_results")
+}
+
+// =============================================================================
+// MODULE 8: LEAVES, NOTICES & AUDIT TRAIL
+// =============================================================================
+
+model LeaveApplication {
+  id           String   @id @default(uuid())
+  schoolId     String
+  studentId    String
+  startDate    DateTime @db.Date
+  endDate      DateTime @db.Date
+  reason       String
+  documentUrl  String?  // Cloud upload URL for medical cert
+  status       String   @default("PENDING") // "PENDING", "APPROVED", "REJECTED"
+  reviewedById String?
+  createdAt    DateTime @default(now())
+
+  school     School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student    Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  reviewedBy User?   @relation("LeavesReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, status])
+  @@map("leave_applications")
+}
+
+model Notice {
+  id          String   @id @default(uuid())
+  schoolId    String
+  title       String
+  content     String
+  targetRole  String   @default("ALL") // "ALL", "TEACHER", "STUDENT"
+  createdById String
+  createdAt   DateTime @default(now())
+
+  school    School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy User   @relation("NoticesCreatedBy", fields: [createdById], references: [id])
+
+  @@index([schoolId, targetRole])
+  @@map("notices")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  schoolId   String
+  userId     String
+  userRole   String
+  action     String   // e.g. "FEE_COLLECTED", "MARKS_UPDATED"
+  entityType String   // e.g. "payment_transactions"
+  entityId   String
+  oldValues  Json?
+  newValues  Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
