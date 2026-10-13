@@ -2,9 +2,11 @@
 
 This document maintains the end-to-end tracking of **Skooltech**:
 - **Phase 1 (Initial Scaffold / Prototype):** Completed baseline architecture.
-- **Audit of Assumptions & Placeholders:** Comprehensive catalog of all mock data, temporary shortcuts, and simulated components currently in the system.
-- **Phase 2 (Production Deepening & Customization Roadmap):** The next 10-step plan to eliminate mocks, connect live relational data, and implement user-directed customizations.
-- **Dashboard Specifications:** A dedicated section to map the exact UI components and functionalities for each user role dashboard based on user input.
+- **Section 1: Audit of Assumptions & Placeholders:** Comprehensive catalog of all mock data, temporary shortcuts, and simulated components currently in the system.
+- **Section 2: Smartest Multi-Tenant Subdomain Architecture:** Industry-standard subdomain isolation (`[tenant].skooltech.in`), RFC 6761 `*.localhost` local testing, dual-mode Next.js middleware, branded logins, and data isolation.
+- **Section 3: Phase 2 Deepening & Customization Roadmap:** 10-step execution plan to eliminate mocks, connect live relational data, and implement user-directed customizations.
+- **Section 4: Dashboard Specifications:** Mapping of exact UI components, cards, tables, and workflows for each role dashboard per user instructions.
+- **Section 5: Phase 1 Baseline Archive:** Completed foundational milestones.
 
 ---
 
@@ -67,7 +69,70 @@ This document maintains the end-to-end tracking of **Skooltech**:
 
 ---
 
-## 🗺️ Section 2: Phase 2 — 10-Step Deepening & Customization Roadmap
+## 🌐 Section 2: Smartest Multi-Tenant Architecture & Subdomain Strategy
+
+### 2.1 The Industry-Standard Subdomain Architecture (`[tenant].skooltech.in`)
+Real-world school ERPs and SaaS platforms (Slack, Notion, Canvas, Shopify) enforce multi-tenancy at the subdomain level rather than path prefixes:
+- **Production Standard:** `https://[tenant].skooltech.in/dashboard/[role]`
+  - Example: `https://aktu.skooltech.in/dashboard/student` (AKTU School Student Portal)
+  - Example: `https://dps.skooltech.in/dashboard/teacher` (DPS Class Teacher Hub)
+  - Example: `https://dps.skooltech.in/dashboard/accounts` (DPS Fee & Cash Desk)
+- **Root Domain:** `https://skooltech.in` serves the public SaaS marketing landing page, product documentation, demo selector, and platform super-admin.
+- **Custom Vanity Domains (CNAME Support):** Schools with custom institutional domains (e.g., `https://portal.aktu.edu.in`) point a CNAME DNS record to `cname.skooltech.in`, which edge middleware maps dynamically to the school's tenant ID.
+
+### 2.2 Localhost Development Myth Busted (`*.localhost:3000`)
+- **Zero DNS Configuration Required (RFC 6761):** Under the IETF RFC 6761 standard, all modern browsers (Chrome, Edge, Firefox, Safari) natively resolve **any** subdomain of `.localhost` directly to loopback IP `127.0.0.1` without editing `/etc/hosts` or installing local DNS servers.
+- **Local Testing URLs:**
+  - `http://aktu.localhost:3000/login` $\rightarrow$ loads AKTU school branded login
+  - `http://aktu.localhost:3000/dashboard/student` $\rightarrow$ loads AKTU student dashboard
+  - `http://dps.localhost:3000/dashboard/teacher` $\rightarrow$ loads DPS teacher portal
+  - `http://localhost:3000` $\rightarrow$ loads the main root marketing portal & 1-click sandbox demo
+
+### 2.3 Next.js Dual-Mode Middleware Rewriting Architecture
+The system employs Next.js edge middleware (`src/middleware.ts`) to transparently rewrite requests into internal dynamic routes (`src/app/[tenant]/...`) while preserving clean URLs in the user's browser:
+
+```mermaid
+flowchart TD
+    Req["Incoming HTTP Request"] --> MW["Next.js Edge Middleware"]
+    MW --> HostCheck{"Host Header Analysis"}
+    HostCheck -->|"aktu.skooltech.in or aktu.localhost:3000"| SubExt["Extract Subdomain: 'aktu'"]
+    HostCheck -->|"portal.aktu.edu.in (Custom CNAME)"| CustomLookup["Resolve CNAME from Cache / DB"]
+    HostCheck -->|"skooltech.in or localhost:3000"| FallbackCheck{"Dev Query or Dev Cookie?"}
+    
+    FallbackCheck -->|"?tenant=aktu or x-dev-tenant"| SubExt
+    FallbackCheck -->|"No Tenant"| ServeRoot["Serve Root Marketing App (src/app/page.tsx)"]
+    
+    SubExt --> Rewrite["NextResponse.rewrite('/[tenant]' + pathname)"]
+    CustomLookup --> Rewrite
+    Rewrite --> AppRoute["Internal Dynamic Route: src/app/[tenant]/dashboard/..."]
+```
+
+#### Dual-Mode Middleware Execution Workflow:
+1. **Primary Mode (Subdomain Extraction):**
+   - Middleware inspects `request.headers.get("host")`.
+   - Strips the port and root domain (`.skooltech.in` or `.localhost:3000`).
+   - Identifies tenant slug (e.g. `aktu`).
+   - Uses `NextResponse.rewrite(new URL('/' + tenant + pathname, req.url))` to route internally. The browser URL stays `aktu.localhost:3000/dashboard/student`.
+2. **Zero-Friction Fallback Mode (For Direct `localhost:3000` Testing):**
+   - When developers test on naked `http://localhost:3000`, the middleware inspects `?tenant=slug` query param or `x-dev-tenant` cookie.
+   - If present, rewrites to `/[tenant]/...` without needing subdomain switching.
+3. **Tenant Validation & Edge Caching:**
+   - Validates tenant slug against cached active schools.
+   - If invalid/suspended, rewrites to a branded "School Not Found" (`/404-school`) page.
+
+### 2.4 Branded Zero-Input Login Experience
+- When a user navigates to `https://aktu.skooltech.in/login` (or `http://aktu.localhost:3000/login`):
+  - **No "School Code" Field Needed:** The school context is established from the subdomain.
+  - **Custom School Branding:** Page automatically renders AKTU's official crest, school name, CBSE/ICSE board affiliation code, and theme color accent.
+  - **Simplified Form:** Students and staff enter only their Admission No / Username and Password.
+
+### 2.5 Multi-Tenant Security & Strict Data Isolation
+- **Session & Cookie Tenant Scoping:** Auth JWT includes `tenantSlug` and `schoolId`. The middleware checks that `session.schoolId === resolvedTenant.id`. If a user logged into DPS navigates to `aktu.skooltech.in`, access is rejected immediately (preventing cross-tenant leakage).
+- **PostgreSQL Row Level Security (RLS):** All database operations inject `schoolId: session.schoolId` in application queries, enforced at the database layer via PostgreSQL session variables (`SET LOCAL app.current_school_id = ...`).
+
+---
+
+## 🗺️ Section 3: Phase 2 — 10-Step Deepening & Customization Roadmap
 
 ```mermaid
 flowchart TD
@@ -135,28 +200,28 @@ flowchart TD
 
 ---
 
-## 📋 Section 3: User-Specified Dashboard Layouts & Functionalities (To Be Defined)
+## 📋 Section 4: User-Specified Dashboard Layouts & Functionalities (To Be Defined)
 
 *This section will be populated in detail based on the user's specific instructions for each portal.*
 
-### 3.1 School Admin Dashboard (`/dashboard/admin`)
+### 4.1 School Admin Dashboard (`/dashboard/admin`)
 - *Pending user specifications...*
 
-### 3.2 Principal Dashboard (`/dashboard/principal`)
+### 4.2 Principal Dashboard (`/dashboard/principal`)
 - *Pending user specifications...*
 
-### 3.3 Accounts & Cash Desk Dashboard (`/dashboard/accounts`)
+### 4.3 Accounts & Cash Desk Dashboard (`/dashboard/accounts`)
 - *Pending user specifications...*
 
-### 3.4 Teacher Portal ("My Class Hub") (`/dashboard/teacher`)
+### 4.4 Teacher Portal ("My Class Hub") (`/dashboard/teacher`)
 - *Pending user specifications...*
 
-### 3.5 Student & Parent Portal (`/dashboard/student`)
+### 4.5 Student & Parent Portal (`/dashboard/student`)
 - *Pending user specifications...*
 
 ---
 
-## 📜 Section 4: Phase 1 Baseline Archive (Completed Scaffolding)
+## 📜 Section 5: Phase 1 Baseline Archive (Completed Scaffolding)
 - [x] Step 1: Project Scaffolding & Design Foundation (Next.js 16, Tailwind, Poppins, 4px radius, Royal Blue `#1D4ED8`).
 - [x] Step 2: Database Architecture, Prisma & Seed Engine (15 Prisma models, seed script for `DEMO01`).
 - [x] Step 3: Multi-Tenant Authentication & Session Engine (JWT cookies, unified `/login`, forced password reset).
@@ -167,3 +232,4 @@ flowchart TD
 - [x] Step 8: Leave Management, Notices & Audit Trail (Leave application & review, notice board, immutable audit log).
 - [x] Step 9: Third-Party Adapters & Abstraction Placeholders (Brevo email/SMS, BYOG Razorpay/Cashfree, local storage, student portal pay).
 - [x] Step 10: Marketing Website, Sandbox Demo Gateway & Vercel Launch Prep (Public pages, 1-click `/demo`, build verified).
+
