@@ -1,44 +1,52 @@
 import { NextResponse } from "next/server";
 import { signSessionToken, SESSION_COOKIE_NAME, SessionPayload, UserRoleType } from "@/lib/auth";
+import prisma from "@/lib/prisma";
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+const DEMO_USERNAMES: Record<string, string> = {
+  admin: "admin_demo",
+  teacher: "teacher_sharma",
+  principal: "principal_demo",
+  accounts: "accounts_demo",
+  student: "ADM-1001",
+};
+
+// Dev-only convenience route for instant demo login. Disabled in production.
 export async function GET(request: Request) {
+  if (IS_PRODUCTION) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
   const { searchParams } = new URL(request.url);
-  const roleParam = searchParams.get("role")?.toLowerCase();
+  const roleParam = searchParams.get("role")?.toLowerCase() || "admin";
+  const username = DEMO_USERNAMES[roleParam] || "admin_demo";
 
-  let targetRole: UserRoleType = "SCHOOL_ADMIN";
-  let username = "admin_demo";
-  let targetPath = "/dashboard/admin";
+  // Look up the real user from the database
+  const user = await prisma.user.findFirst({
+    where: { username },
+    include: { school: true },
+  });
 
-  if (roleParam === "teacher") {
-    targetRole = "TEACHER";
-    username = "teacher_sharma";
-    targetPath = "/dashboard/teacher";
-  } else if (roleParam === "principal") {
-    targetRole = "PRINCIPAL";
-    username = "principal_demo";
-    targetPath = "/dashboard/principal";
-  } else if (roleParam === "accounts") {
-    targetRole = "ACCOUNTS";
-    username = "accounts_demo";
-    targetPath = "/dashboard/accounts";
-  } else if (roleParam === "student") {
-    targetRole = "STUDENT";
-    username = "ADM-1001";
-    targetPath = "/dashboard/student";
+  if (!user) {
+    return NextResponse.json(
+      { error: `Demo user '${username}' not found. Run 'npx prisma db seed' first.` },
+      { status: 404 }
+    );
   }
 
   const payload: SessionPayload = {
-    userId: `demo-user-${username}`,
-    schoolId: "demo-school-greenwood-001",
-    schoolCode: "DEMO01",
-    schoolName: "Delhi Public Heritage School",
-    username,
-    role: targetRole,
-    mustChangePassword: false,
+    userId: user.id,
+    schoolId: user.schoolId,
+    schoolCode: user.school.code,
+    schoolName: user.school.name,
+    username: user.username,
+    role: user.role as UserRoleType,
+    mustChangePassword: user.mustChangePassword,
   };
 
   const token = await signSessionToken(payload);
-  const response = NextResponse.redirect(new URL(targetPath, request.url));
+  const response = NextResponse.redirect(new URL("/dashboard", request.url));
 
   response.cookies.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,

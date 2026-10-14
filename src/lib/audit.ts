@@ -3,8 +3,8 @@ import { Prisma } from "@prisma/client";
 
 export interface CreateAuditLogParams {
   schoolId: string;
-  userId: string;
-  userRole: string;
+  userId?: string | null;
+  userRole?: string | null;
   action: string;
   entityType: string;
   entityId: string;
@@ -23,8 +23,8 @@ export async function recordAuditLog(params: CreateAuditLogParams) {
     return await prisma.auditLog.create({
       data: {
         schoolId: params.schoolId,
-        userId: params.userId,
-        userRole: params.userRole,
+        userId: params.userId ?? null,
+        userRole: params.userRole ?? "SYSTEM",
         action: params.action,
         entityType: params.entityType,
         entityId: params.entityId,

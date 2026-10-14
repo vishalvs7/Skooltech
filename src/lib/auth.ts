@@ -1,8 +1,24 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 
-const JWT_SECRET_STRING = process.env.JWT_SECRET || "skooltech-super-secret-development-key-32chars";
-const JWT_SECRET = new TextEncoder().encode(JWT_SECRET_STRING);
+let cachedSecret: Uint8Array | null = null;
+
+function getJwtSecret(): Uint8Array {
+  if (cachedSecret) return cachedSecret;
+
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "JWT_SECRET environment variable is required in production. Set it to a strong random string (min 32 chars)."
+      );
+    }
+    cachedSecret = new TextEncoder().encode("skooltech-super-secret-development-key-32chars");
+    return cachedSecret;
+  }
+  cachedSecret = new TextEncoder().encode(secret);
+  return cachedSecret;
+}
 export const SESSION_COOKIE_NAME = "skooltech_session";
 
 export type UserRoleType = 
@@ -31,7 +47,7 @@ export async function signSessionToken(payload: SessionPayload): Promise<string>
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("7d")
-    .sign(JWT_SECRET);
+    .sign(getJwtSecret());
 }
 
 /**
@@ -39,7 +55,7 @@ export async function signSessionToken(payload: SessionPayload): Promise<string>
  */
 export async function verifySessionToken(token: string): Promise<SessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
+    const { payload } = await jwtVerify(token, getJwtSecret());
     return payload as unknown as SessionPayload;
   } catch {
     return null;
@@ -95,6 +111,16 @@ export function getRoleDashboardPath(role: UserRoleType): string {
     case "STUDENT":
       return "/dashboard/student";
     default:
-      return "/dashboard/student";
+      return "/";
   }
+}
+
+/**
+ * Archive (cross-role student search) is restricted to these roles.
+ * Enforced in middleware AND in the archive layout (defense in depth).
+ */
+const ARCHIVE_ROLES: UserRoleType[] = ["SUPER_ADMIN", "SCHOOL_ADMIN", "PRINCIPAL", "ACCOUNTS"];
+
+export function canAccessArchive(role: UserRoleType): boolean {
+  return ARCHIVE_ROLES.includes(role);
 }

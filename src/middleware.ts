@@ -2,8 +2,22 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 
-const JWT_SECRET_STRING = process.env.JWT_SECRET || "skooltech-super-secret-development-key-32chars";
-const JWT_SECRET = new TextEncoder().encode(JWT_SECRET_STRING);
+let cachedSecret: Uint8Array | null = null;
+
+function getJwtSecret(): Uint8Array {
+  if (cachedSecret) return cachedSecret;
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("JWT_SECRET environment variable is required in production.");
+    }
+    cachedSecret = new TextEncoder().encode("skooltech-super-secret-development-key-32chars");
+    return cachedSecret;
+  }
+  cachedSecret = new TextEncoder().encode(secret);
+  return cachedSecret;
+}
+
 const SESSION_COOKIE_NAME = "skooltech_session";
 
 interface DecodedSession {
@@ -30,18 +44,24 @@ function getRoleHome(role: DecodedSession["role"]): string {
     case "STUDENT":
       return "/dashboard/student";
     default:
-      return "/dashboard/student";
+      return "/";
   }
 }
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // Block /demo route entirely in production
+  if (pathname === "/demo" && process.env.NODE_ENV === "production") {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
 
   let session: DecodedSession | null = null;
   if (token) {
     try {
-      const { payload } = await jwtVerify(token, JWT_SECRET);
+      const { payload } = await jwtVerify(token, getJwtSecret());
       session = payload as unknown as DecodedSession;
     } catch {
       session = null;
@@ -78,6 +98,10 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL(getRoleHome(role), request.url));
     }
     if (pathname.startsWith("/dashboard/student") && role !== "STUDENT" && !isSuperOrAdmin) {
+      return NextResponse.redirect(new URL(getRoleHome(role), request.url));
+    }
+    // Archive: shared cross-role route (Admin / Principal / Accounts only)
+    if (pathname.startsWith("/dashboard/archive") && role !== "PRINCIPAL" && role !== "ACCOUNTS" && !isSuperOrAdmin) {
       return NextResponse.redirect(new URL(getRoleHome(role), request.url));
     }
 

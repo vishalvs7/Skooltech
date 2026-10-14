@@ -41,7 +41,7 @@ export default function Home() {
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
             <Link href="/" className="text-blue-700 font-semibold">Overview</Link>
-            <Link href="/pricing" className="hover:text-blue-700 transition">Pricing (INR ₹)</Link>
+            <Link href="/pricing" className="hover:text-blue-700 transition">Pricing</Link>
             <Link href="/about" className="hover:text-blue-700 transition">About</Link>
             <Link href="/contact" className="hover:text-blue-700 transition">Contact</Link>
           </nav>
@@ -88,7 +88,7 @@ export default function Home() {
             </Link>
             <Link href="/pricing">
               <Button variant="outline" size="lg" className="px-6 font-medium">
-                View Pricing Plans (INR ₹)
+                View Pricing Plans
               </Button>
             </Link>
             <Link href="/register">
@@ -336,7 +336,7 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-6">
-              <Link href="/pricing" className="hover:text-blue-700">Pricing (INR ₹)</Link>
+              <Link href="/pricing" className="hover:text-blue-700">Pricing</Link>
               <Link href="/about" className="hover:text-blue-700">About Us</Link>
               <Link href="/contact" className="hover:text-blue-700">Contact</Link>
               <Link href="/register" className="hover:text-blue-700">Register</Link>
@@ -347,7 +347,7 @@ export default function Home() {
           <div className="flex flex-col sm:flex-row items-center justify-between border-t border-slate-100 pt-6 text-[11px] text-slate-400 gap-2">
             <div>&copy; {new Date().getFullYear()} Skooltech Technologies India Pvt Ltd. All rights reserved.</div>
             <div className="flex items-center gap-4">
-              <span>Currency: Indian Rupee (INR / ₹)</span>
+              <span>All prices in Indian Rupees</span>
               <span>Geometry: Strict 4px Radius</span>
               <span>Theme: Light Mode Only</span>
             </div>

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import prisma from "@/lib/prisma";
 import { getSession } from "@/lib/auth";
+import { recordAuditLog } from "@/lib/audit";
 
 export interface FeePaymentResponse {
   success: boolean;
@@ -25,8 +26,16 @@ export interface FeePaymentResponse {
 }
 
 /**
- * STEP 6: Accountant processes Counter Cash/UPI/Draft Fee Payment
+ * Generate a collision-resistant receipt number using timestamp + random suffix.
+ * In production, replace with a DB sequence or ULID generator.
  */
+function generateReceiptNo(): string {
+  const year = new Date().getFullYear();
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.floor(Math.random() * 46656).toString(36).toUpperCase().padStart(3, "0");
+  return `RCP-${year}-${timestamp}${random}`;
+}
+
 export async function collectCounterPaymentAction(
   prevState: FeePaymentResponse | null,
   formData: FormData
@@ -37,9 +46,6 @@ export async function collectCounterPaymentAction(
   }
 
   const studentAdmissionNo = (formData.get("admissionNo") as string)?.trim().toUpperCase();
-  const studentName = formData.get("studentName") as string;
-  const className = formData.get("className") as string;
-  const rollNo = formData.get("rollNo") as string;
   const amountPaid = parseFloat((formData.get("amountPaid") as string) || "0");
   const lateFeeCharged = parseFloat((formData.get("lateFeeCharged") as string) || "0");
   const paymentMethod = formData.get("paymentMethod") as "CASH" | "UPI" | "BANK_DRAFT";
@@ -51,24 +57,20 @@ export async function collectCounterPaymentAction(
     return { success: false, error: "Valid Admission Number and positive payment amount are required." };
   }
 
+  if (!["CASH", "UPI", "BANK_DRAFT"].includes(paymentMethod)) {
+    return { success: false, error: "Invalid payment method." };
+  }
+
   if (paymentMethod === "UPI" && (!referenceNo || referenceNo.length < 6)) {
-    return { success: false, error: "Please enter a valid 12-digit UPI UTR reference number." };
+    return { success: false, error: "Please enter a valid UPI UTR reference number (min 6 chars)." };
   }
 
   if (paymentMethod === "BANK_DRAFT" && (!referenceNo || !bankName)) {
     return { success: false, error: "Draft Number and Issuing Bank Name are required for Bank Drafts." };
   }
 
-  const randomVoucherNum = Math.floor(1000 + Math.random() * 9000);
-  const receiptNo = `RCP-2026-${randomVoucherNum}`;
-  const transactionDate = new Date().toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-
   try {
-    // Attempt DB transaction
+    // 1. Find student within this school only
     const student = await prisma.student.findUnique({
       where: {
         schoolId_admissionNo: {
@@ -77,17 +79,47 @@ export async function collectCounterPaymentAction(
         },
       },
       include: {
+        enrollments: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          include: {
+            section: { include: { class: true } },
+          },
+        },
         feeInvoices: {
           where: { isPaid: false },
+          orderBy: { dueDate: "asc" },
           take: 1,
         },
       },
     });
 
-    if (student && student.feeInvoices.length > 0) {
-      const invoice = student.feeInvoices[0];
+    if (!student) {
+      return { success: false, error: `Student with admission number ${studentAdmissionNo} not found in your school.` };
+    }
 
-      await prisma.paymentTransaction.create({
+    if (student.feeInvoices.length === 0) {
+      return { success: false, error: `No pending fee invoices found for ${student.fullName} (${studentAdmissionNo}).` };
+    }
+
+    const invoice = student.feeInvoices[0];
+    const invoiceBalance = Number(invoice.baseAmount) - Number(invoice.paidAmount);
+
+    if (amountPaid > invoiceBalance + lateFeeCharged) {
+      return {
+        success: false,
+        error: `Payment amount ₹${amountPaid.toLocaleString("en-IN")} exceeds outstanding balance of ₹${invoiceBalance.toLocaleString("en-IN")}.`,
+      };
+    }
+
+    const receiptNo = generateReceiptNo();
+    const totalDue = Number(invoice.baseAmount) + lateFeeCharged;
+    const newPaidAmount = Number(invoice.paidAmount) + amountPaid;
+    const fullyPaid = newPaidAmount >= totalDue;
+
+    // 2. Atomic transaction: payment + invoice update + audit
+    await prisma.$transaction(async (tx) => {
+      await tx.paymentTransaction.create({
         data: {
           schoolId: session.schoolId,
           invoiceId: invoice.id,
@@ -102,16 +134,15 @@ export async function collectCounterPaymentAction(
         },
       });
 
-      await prisma.feeInvoice.update({
+      await tx.feeInvoice.update({
         where: { id: invoice.id },
         data: {
           paidAmount: { increment: amountPaid },
-          isPaid: true,
+          isPaid: fullyPaid,
         },
       });
 
-      // Immutable Audit Log
-      await prisma.auditLog.create({
+      await tx.auditLog.create({
         data: {
           schoolId: session.schoolId,
           userId: session.userId,
@@ -125,50 +156,42 @@ export async function collectCounterPaymentAction(
             amountPaid,
             lateFeeCharged,
             paymentMethod,
+            invoiceId: invoice.id,
+            fullyPaid,
           },
         },
       });
-    }
+    });
 
     revalidatePath("/dashboard/accounts");
+
+    const currentEnrollment = student.enrollments[0];
     return {
       success: true,
-      message: `Payment of ₹${amountPaid.toLocaleString("en-IN")} collected successfully. Receipt #${receiptNo} generated.`,
+      message: `Payment of ₹${amountPaid.toLocaleString("en-IN")} collected successfully. Receipt #${receiptNo} generated.${fullyPaid ? " Invoice fully paid." : ` ₹${(totalDue - newPaidAmount).toLocaleString("en-IN")} still outstanding.`}`,
       receiptData: {
         receiptNo,
-        studentName: studentName || "Aarav Sharma",
-        admissionNo: studentAdmissionNo,
-        className: className || "Class 5-A",
-        rollNo: rollNo || "1",
+        studentName: student.fullName,
+        admissionNo: student.admissionNo,
+        className: currentEnrollment
+          ? `${currentEnrollment.section.class.name} - ${currentEnrollment.section.name}`
+          : "N/A",
+        rollNo: currentEnrollment?.rollNo || "N/A",
         amountPaid,
         lateFeeCharged,
         paymentMethod,
         referenceNo,
         bankName,
-        date: transactionDate,
+        date: new Date().toLocaleDateString("en-IN", {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+        }),
         cashierName: session.username,
       },
     };
-  } catch {
-    // Sandbox fallback
-    revalidatePath("/dashboard/accounts");
-    return {
-      success: true,
-      message: `[Sandbox] Fee collected successfully! Receipt #${receiptNo} generated and printed.`,
-      receiptData: {
-        receiptNo,
-        studentName: studentName || "Ishaan Gupta",
-        admissionNo: studentAdmissionNo,
-        className: className || "Class 5-A",
-        rollNo: rollNo || "4",
-        amountPaid,
-        lateFeeCharged,
-        paymentMethod,
-        referenceNo,
-        bankName,
-        date: transactionDate,
-        cashierName: session.username,
-      },
-    };
+  } catch (error) {
+    console.error("Failed to collect counter payment:", error);
+    return { success: false, error: "Database error while processing payment. Nothing was saved." };
   }
 }

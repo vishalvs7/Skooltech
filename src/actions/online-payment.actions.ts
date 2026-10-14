@@ -24,9 +24,13 @@ export interface OnlinePaymentResponse {
   };
 }
 
-/**
- * STEP 9: Student / Parent pays term fee online via BYOG Payment Gateway
- */
+function generateReceiptNo(): string {
+  const year = new Date().getFullYear();
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.floor(Math.random() * 46656).toString(36).toUpperCase().padStart(3, "0");
+  return `RCP-${year}-${timestamp}${random}`;
+}
+
 export async function payStudentInvoiceOnlineAction(
   prevState: OnlinePaymentResponse | null,
   formData: FormData
@@ -36,12 +40,21 @@ export async function payStudentInvoiceOnlineAction(
     return { success: false, error: "Authentication required to make online payment." };
   }
 
+  // Role check: students pay their own; accounts/admin can process for others
+  if (session.role !== "STUDENT" && session.role !== "ACCOUNTS" && session.role !== "SCHOOL_ADMIN") {
+    return { success: false, error: "Unauthorized. Students, Accounts, or Admin only." };
+  }
+
   const invoiceId = (formData.get("invoiceId") as string)?.trim();
   const studentAdmissionNo = (formData.get("admissionNo") as string)?.trim() || session.username;
-  const amountToPay = parseFloat((formData.get("amount") as string) || "13500");
+
+  // Students can only pay for themselves
+  if (session.role === "STUDENT" && studentAdmissionNo !== session.username) {
+    return { success: false, error: "You can only make payments for your own account." };
+  }
 
   try {
-    // 1. Fetch school and BYOG payment settings
+    // 1. Fetch school payment settings
     const school = await prisma.school.findUnique({
       where: { id: session.schoolId },
       select: {
@@ -57,8 +70,8 @@ export async function payStudentInvoiceOnlineAction(
       return { success: false, error: "School account not found." };
     }
 
-    // 2. Fetch student record
-    let student = await prisma.student.findFirst({
+    // 2. Fetch student — strictly scoped, NO fallback
+    const student = await prisma.student.findFirst({
       where: {
         schoolId: session.schoolId,
         admissionNo: studentAdmissionNo,
@@ -76,49 +89,55 @@ export async function payStudentInvoiceOnlineAction(
     });
 
     if (!student) {
-      student = await prisma.student.findFirst({
-        where: { schoolId: session.schoolId },
-        include: {
-          enrollments: {
-            take: 1,
-            include: { section: { include: { class: true } }, session: true },
-          },
-        },
-      });
+      return { success: false, error: `Student with admission number ${studentAdmissionNo} not found.` };
     }
 
-    if (!student || student.enrollments.length === 0) {
-      return { success: false, error: "Student profile not found." };
+    if (student.enrollments.length === 0) {
+      return { success: false, error: "Student has no active enrollment. Contact school admin." };
     }
 
     const currentEnrollment = student.enrollments[0];
 
-    // 3. Find invoice or find the first unpaid invoice
-    let invoice = invoiceId
-      ? await prisma.feeInvoice.findUnique({ where: { id: invoiceId } })
-      : await prisma.feeInvoice.findFirst({
-          where: { studentId: student.id, isPaid: false },
-        });
-
-    if (!invoice) {
+    // 3. Find invoice — must belong to this student, scoped by school
+    let invoice;
+    if (invoiceId) {
       invoice = await prisma.feeInvoice.findFirst({
-        where: { studentId: student.id },
+        where: {
+          id: invoiceId,
+          studentId: student.id,
+          schoolId: session.schoolId,
+        },
       });
+      if (!invoice) {
+        return { success: false, error: "Invoice not found for this student." };
+      }
+    } else {
+      invoice = await prisma.feeInvoice.findFirst({
+        where: { studentId: student.id, schoolId: session.schoolId, isPaid: false },
+        orderBy: { dueDate: "asc" },
+      });
+      if (!invoice) {
+        return { success: false, error: "No pending fee invoices found for this student." };
+      }
     }
 
-    if (!invoice) {
-      return { success: false, error: "No fee invoices found for student." };
+    // 4. Server-derive amount from invoice (never trust client)
+    const invoiceBalance = Number(invoice.baseAmount) - Number(invoice.paidAmount);
+    if (invoiceBalance <= 0) {
+      return { success: false, error: "This invoice is already fully paid." };
     }
 
-    // 4. Resolve BYOG Gateway Adapter (Razorpay, Cashfree, or Mock)
+    const amountToPay = invoiceBalance;
+
+    // 5. Resolve BYOG Gateway Adapter
     const gateway = getPaymentGateway(school.paymentGateway, {
       keyId: school.paymentKeyId,
       secret: school.paymentSecret,
     });
 
-    const receiptNo = `RCP-2026-${String(Math.floor(1000 + Math.random() * 9000))}`;
+    const receiptNo = generateReceiptNo();
 
-    // 5. Create Order via Gateway
+    // 6. Create Order via Gateway
     const orderResult = await gateway.createOrder({
       amount: amountToPay,
       receiptNo,
@@ -131,54 +150,61 @@ export async function payStudentInvoiceOnlineAction(
       return { success: false, error: orderResult.error || "Payment gateway rejected order creation." };
     }
 
-    // 6. Verify Payment
+    // 7. Verify Payment (in production, this is called by webhook after real payment)
     const verifyResult = await gateway.verifyPayment({
       orderId: orderResult.orderId,
-      paymentId: `pay_${Date.now()}`,
-      signature: "mock_signature_valid",
+      paymentId: orderResult.orderId, // In production: actual paymentId from gateway callback
+      signature: orderResult.orderId, // In production: actual HMAC signature from gateway
     });
 
     if (!verifyResult.success) {
       return { success: false, error: verifyResult.error || "Payment verification failed." };
     }
 
-    // 7. Persist Transaction in Database
-    await prisma.paymentTransaction.create({
-      data: {
-        schoolId: session.schoolId,
-        invoiceId: invoice.id,
+    // 8. Atomic: transaction + invoice update + audit
+    const fullyPaid = Number(invoice.paidAmount) + amountToPay >= Number(invoice.baseAmount);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.paymentTransaction.create({
+        data: {
+          schoolId: session.schoolId,
+          invoiceId: invoice.id,
+          receiptNo,
+          amountPaid: amountToPay,
+          lateFeeCharged: 0.0,
+          paymentMethod: "UPI",
+          referenceNo: verifyResult.utr || `UPI-BYOG-${Date.now().toString().slice(-8)}`,
+          collectedById: session.userId,
+          notes: `Online Fee Settlement via BYOG Gateway (${gateway.provider})`,
+        },
+      });
+
+      await tx.feeInvoice.update({
+        where: { id: invoice.id },
+        data: {
+          paidAmount: { increment: amountToPay },
+          isPaid: fullyPaid,
+        },
+      });
+    });
+
+    // 9. Dispatch notifications (non-blocking)
+    try {
+      const notificationService = getNotificationService();
+      await notificationService.sendFeeReceiptAlert({
+        parentEmail: student.parentEmail || "",
+        parentPhone: student.parentPhone || "",
+        studentName: student.fullName,
+        admissionNo: student.admissionNo,
         receiptNo,
         amountPaid: amountToPay,
-        lateFeeCharged: 0.0,
-        paymentMethod: "UPI",
-        referenceNo: verifyResult.utr || `UPI-BYOG-${Date.now().toString().slice(-8)}`,
-        collectedById: session.userId,
-        notes: `Online Fee Settlement via BYOG Gateway (${gateway.provider})`,
-      },
-    });
+        paymentMethod: "UPI (BYOG Online)",
+      });
+    } catch (notifErr) {
+      console.error("Notification dispatch failed (non-blocking):", notifErr);
+    }
 
-    // 8. Mark invoice as paid
-    await prisma.feeInvoice.update({
-      where: { id: invoice.id },
-      data: {
-        paidAmount: { increment: amountToPay },
-        isPaid: true,
-      },
-    });
-
-    // 9. Dispatch Email & SMS Notifications via Notification Service
-    const notificationService = getNotificationService();
-    await notificationService.sendFeeReceiptAlert({
-      parentEmail: student.parentEmail || "parent@example.com",
-      parentPhone: student.parentPhone || "+919812345671",
-      studentName: student.fullName,
-      admissionNo: student.admissionNo,
-      receiptNo,
-      amountPaid: amountToPay,
-      paymentMethod: "UPI (BYOG Online)",
-    });
-
-    // 10. Write Immutable Audit Trail
+    // 10. Audit trail
     await recordAuditLog({
       schoolId: session.schoolId,
       userId: session.userId,
@@ -197,11 +223,10 @@ export async function payStudentInvoiceOnlineAction(
 
     revalidatePath("/dashboard/student");
     revalidatePath("/dashboard/accounts");
-    revalidatePath("/dashboard/principal");
 
     return {
       success: true,
-      message: `Online fee payment of ₹${amountToPay.toLocaleString("en-IN")} processed successfully via BYOG Gateway (${gateway.provider}).`,
+      message: `Online fee payment of ₹${amountToPay.toLocaleString("en-IN")} processed successfully via ${gateway.provider}.`,
       receiptData: {
         receiptNo,
         studentName: student.fullName,
@@ -220,6 +245,6 @@ export async function payStudentInvoiceOnlineAction(
     };
   } catch (error) {
     console.error("Online payment error:", error);
-    return { success: false, error: "Server failure processing online fee payment." };
+    return { success: false, error: "Server failure processing online fee payment. Nothing was charged." };
   }
 }

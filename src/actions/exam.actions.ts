@@ -136,8 +136,27 @@ export async function recordBatchMarksAction(
   try {
     let savedCount = 0;
 
+    // Verify exam belongs to this school
+    const exam = await prisma.exam.findFirst({
+      where: { id: examId, schoolId: session.schoolId },
+    });
+    if (!exam) {
+      return { success: false, error: "Exam not found in your school." };
+    }
+
+    // Verify all enrollmentIds belong to this school
+    const enrollmentIds = marksEntries.map((e) => e.enrollmentId).filter(Boolean);
+    const validEnrollments = await prisma.enrollment.findMany({
+      where: {
+        id: { in: enrollmentIds },
+        student: { schoolId: session.schoolId },
+      },
+      select: { id: true },
+    });
+    const validIdSet = new Set(validEnrollments.map((e) => e.id));
+
     for (const entry of marksEntries) {
-      if (!entry.enrollmentId) continue;
+      if (!entry.enrollmentId || !validIdSet.has(entry.enrollmentId)) continue;
       const obtained = Math.min(Math.max(0, Number(entry.obtainedMarks) || 0), totalMarks);
 
       await prisma.examResult.upsert({
@@ -165,6 +184,10 @@ export async function recordBatchMarksAction(
       });
 
       savedCount++;
+    }
+
+    if (savedCount === 0) {
+      return { success: false, error: "No valid student records found in your school for the provided enrollments." };
     }
 
     // Audit trail log
@@ -211,7 +234,17 @@ export async function getStudentReportCardAction(
     return { success: false, error: "Authentication required." };
   }
 
-  const admissionNo = targetAdmissionNo || session.username;
+  // Role-based access: students can only view their own; staff can view any in their school
+  let admissionNo: string;
+  if (session.role === "STUDENT") {
+    // Students can only view their own report card
+    admissionNo = targetAdmissionNo || session.username;
+    if (targetAdmissionNo && targetAdmissionNo !== session.username) {
+      return { success: false, error: "You can only view your own report card." };
+    }
+  } else {
+    admissionNo = targetAdmissionNo || session.username;
+  }
 
   try {
     // 1. Fetch School settings (CBSE affiliation, gradingScale)
@@ -252,11 +285,11 @@ export async function getStudentReportCardAction(
 
     const currentEnrollment = student.enrollments[0];
 
-    // 3. Find Exam (or latest exam if not specified)
+    // 3. Find Exam (or latest exam if not specified) — always scoped to school
     let exam;
     if (targetExamId) {
-      exam = await prisma.exam.findUnique({
-        where: { id: targetExamId },
+      exam = await prisma.exam.findFirst({
+        where: { id: targetExamId, schoolId: session.schoolId },
       });
     } else {
       exam = await prisma.exam.findFirst({
@@ -286,9 +319,11 @@ export async function getStudentReportCardAction(
       },
     });
 
-    const attendanceTotal = attendanceRecords.length || 25;
-    const attendancePresent = attendanceRecords.filter((a) => a.status === "PRESENT").length || 24;
-    const attendancePercentage = Math.round((attendancePresent / attendanceTotal) * 1000) / 10;
+    const attendanceTotal = attendanceRecords.length;
+    const attendancePresent = attendanceRecords.filter((a) => a.status === "PRESENT").length;
+    const attendancePercentage = attendanceTotal > 0
+      ? Math.round((attendancePresent / attendanceTotal) * 1000) / 10
+      : 0;
 
     // 6. Map to grading calculator format
     const subjectInputs = results.map((r) => ({
@@ -309,8 +344,8 @@ export async function getStudentReportCardAction(
         rollNo: currentEnrollment.rollNo || "01",
         className: currentEnrollment.section.class.name,
         sectionName: currentEnrollment.section.name,
-        schoolName: school?.name || "Delhi Public Heritage School",
-        affiliationNo: school?.affiliationNo || "CBSE/AFF/2026/9821",
+        schoolName: school?.name || "School Name Not Configured",
+        affiliationNo: school?.affiliationNo || "Not Configured",
         academicYear: currentEnrollment.session.name,
         examName: exam.name,
         examType: exam.examType,

@@ -6,9 +6,6 @@ import { getSession } from "@/lib/auth";
 
 export interface AttendanceRecordInput {
   enrollmentId: string;
-  studentName: string;
-  admissionNo: string;
-  rollNo: string;
   status: "PRESENT" | "ABSENT" | "LATE" | "EXCUSED";
   remarks?: string;
 }
@@ -22,9 +19,6 @@ export interface AttendanceActionResponse {
   lateCount?: number;
 }
 
-/**
- * Submit / Update Daily Attendance for a Section
- */
 export async function saveDailyAttendanceAction(
   dateStr: string,
   records: AttendanceRecordInput[]
@@ -45,53 +39,65 @@ export async function saveDailyAttendanceAction(
   try {
     const attendanceDate = new Date(dateStr);
 
-    // Persist each attendance entry
-    for (const record of records) {
-      await prisma.attendance.upsert({
-        where: {
-          enrollmentId_date: {
-            enrollmentId: record.enrollmentId,
-            date: attendanceDate,
-          },
-        },
-        update: {
-          status: record.status,
-          remarks: record.remarks || null,
-          markedById: session.userId,
-        },
-        create: {
-          schoolId: session.schoolId,
-          enrollmentId: record.enrollmentId,
-          date: attendanceDate,
-          status: record.status,
-          remarks: record.remarks || null,
-          markedById: session.userId,
-        },
-      });
+    // 1. Verify all enrollmentIds belong to this school (tenant isolation)
+    const enrollmentIds = records.map((r) => r.enrollmentId);
+    const validEnrollments = await prisma.enrollment.findMany({
+      where: {
+        id: { in: enrollmentIds },
+        student: { schoolId: session.schoolId },
+      },
+      select: { id: true },
+    });
+
+    const validIdSet = new Set(validEnrollments.map((e) => e.id));
+    const invalidIds = enrollmentIds.filter((id) => !validIdSet.has(id));
+
+    if (invalidIds.length > 0) {
+      return {
+        success: false,
+        error: `Unauthorized: ${invalidIds.length} enrollment(s) do not belong to your school. Attendance not saved.`,
+      };
     }
 
-    // In production: trigger Brevo absence emails for any absent students here
+    // 2. Atomically upsert all attendance records
+    await prisma.$transaction(
+      records.map((record) =>
+        prisma.attendance.upsert({
+          where: {
+            enrollmentId_date: {
+              enrollmentId: record.enrollmentId,
+              date: attendanceDate,
+            },
+          },
+          update: {
+            status: record.status,
+            remarks: record.remarks || null,
+            markedById: session.userId,
+          },
+          create: {
+            schoolId: session.schoolId,
+            enrollmentId: record.enrollmentId,
+            date: attendanceDate,
+            status: record.status,
+            remarks: record.remarks || null,
+            markedById: session.userId,
+          },
+        })
+      )
+    );
+
     revalidatePath("/dashboard/teacher");
     revalidatePath("/dashboard/principal");
 
     return {
       success: true,
-      message: `Attendance saved for ${dateStr}: ${presentCount} Present, ${absentCount} Absent, ${lateCount} Late. ${absentCount > 0 ? `${absentCount} absence email alerts dispatched via Brevo.` : ""}`,
+      message: `Attendance saved for ${dateStr}: ${presentCount} Present, ${absentCount} Absent, ${lateCount} Late.`,
       presentCount,
       absentCount,
       lateCount,
     };
-  } catch {
-    // Sandbox offline fallback
-    revalidatePath("/dashboard/teacher");
-    revalidatePath("/dashboard/principal");
-
-    return {
-      success: true,
-      message: `[Sandbox] Attendance recorded for ${dateStr}: ${presentCount} Present, ${absentCount} Absent, ${lateCount} Late. Absence notifications queued.`,
-      presentCount,
-      absentCount,
-      lateCount,
-    };
+  } catch (error) {
+    console.error("Failed to save attendance:", error);
+    return { success: false, error: "Database error while saving attendance. Nothing was persisted." };
   }
 }

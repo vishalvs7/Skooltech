@@ -1,194 +1,239 @@
 import { getSession } from "@/lib/auth";
-import { assignFeePackageAction } from "@/actions/student.actions";
+import { isDatabaseConfigured } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
+import { DatabaseSetupNotice } from "@/components/shared/DatabaseSetupNotice";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { IndianRupee, Receipt, AlertCircle, Printer, CheckCircle2, ArrowRight } from "lucide-react";
-import { CashCollectionModal } from "@/components/accounts/CashCollectionModal";
+import { IndianRupee, AlertCircle, Receipt, TrendingUp } from "lucide-react";
+import { CashCollectionModal, type OverdueStudent } from "@/components/accounts/CashCollectionModal";
 import { FeeStructureModal } from "@/components/accounts/FeeStructureModal";
 
-export default async function AccountsDashboardPage() {
+export default async function AccountsOverviewPage() {
   const session = await getSession();
+  if (!session) return null;
+  if (!isDatabaseConfigured()) return <DatabaseSetupNotice />;
+
+  const schoolId = session.schoolId;
+
+  // Fetch real financial data
+  const [
+    totalCollected,
+    todayCollected,
+    totalOutstanding,
+    overdueCount,
+    pendingFeeStudents,
+    recentTransactions,
+    totalInvoices,
+    paidInvoices,
+    overdueInvoicesList,
+  ] = await Promise.all([
+    prisma.paymentTransaction.aggregate({
+      where: { schoolId },
+      _sum: { amountPaid: true },
+    }),
+    prisma.paymentTransaction.aggregate({
+      where: {
+        schoolId,
+        createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+      },
+      _sum: { amountPaid: true },
+    }),
+    prisma.feeInvoice.aggregate({
+      where: { schoolId, isPaid: false },
+      _sum: { baseAmount: true, paidAmount: true },
+    }),
+    prisma.feeInvoice.count({
+      where: {
+        schoolId,
+        isPaid: false,
+        dueDate: { lt: new Date() },
+      },
+    }),
+    prisma.student.count({
+      where: { schoolId, status: "PENDING_FEE" },
+    }),
+    prisma.paymentTransaction.findMany({
+      where: { schoolId },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+      include: {
+        invoice: {
+          include: {
+            student: { select: { fullName: true, admissionNo: true } },
+          },
+        },
+      },
+    }),
+    prisma.feeInvoice.count({ where: { schoolId } }),
+    prisma.feeInvoice.count({ where: { schoolId, isPaid: true } }),
+    prisma.feeInvoice.findMany({
+      where: { schoolId, isPaid: false },
+      include: {
+        student: {
+          select: {
+            fullName: true,
+            admissionNo: true,
+            enrollments: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              include: { section: { include: { class: true } } },
+            },
+          },
+        },
+      },
+      orderBy: { dueDate: "asc" },
+      take: 10,
+    }),
+  ]);
+
+  const overdueStudents: OverdueStudent[] = overdueInvoicesList.map((inv) => ({
+    admissionNo: inv.student.admissionNo,
+    name: inv.student.fullName,
+    className: inv.student.enrollments[0]
+      ? `${inv.student.enrollments[0].section.class.name} - Sec ${inv.student.enrollments[0].section.name}`
+      : "N/A",
+    rollNo: inv.student.enrollments[0]?.rollNo || "—",
+    baseAmount: Number(inv.baseAmount),
+    paidAmount: Number(inv.paidAmount),
+    dueDate: inv.dueDate.toISOString().split("T")[0],
+  }));
+
+  const totalCollectedAmt = Number(totalCollected._sum.amountPaid || 0);
+  const todayCollectedAmt = Number(todayCollected._sum.amountPaid || 0);
+  const outstandingAmt = totalOutstanding._sum.baseAmount
+    ? Number(totalOutstanding._sum.baseAmount) - Number(totalOutstanding._sum.paidAmount || 0)
+    : 0;
 
   return (
     <div className="space-y-6">
-      {/* Top Banner with Action Modals */}
       <div className="bg-white border border-slate-200 rounded-[4px] p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <Badge variant="success" className="text-xs uppercase font-medium">Accounts & Cash Desk</Badge>
-            <span className="text-xs text-slate-500 font-mono">Currency: INR (₹)</span>
+            <Badge variant="success" className="text-xs uppercase">Accounts & Cash Desk</Badge>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            Counter Fee Collection & Setup
-          </h1>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Process counter payments (Cash, UPI UTR, Bank Drafts), calculate dynamic late fees, and auto-print receipts.
-          </p>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Counter Fee Collection & Setup</h1>
+          <p className="text-sm text-slate-600 mt-0.5">Process payments, calculate late fees, and print receipts.</p>
         </div>
-
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <FeeStructureModal />
-          <CashCollectionModal />
+          <CashCollectionModal overdueStudents={overdueStudents} />
         </div>
       </div>
 
-      {/* Metrics Row */}
+      {/* Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs font-semibold uppercase">Total Collected (Q1)</CardDescription>
-            <CardTitle className="text-2xl font-bold text-emerald-700 flex items-center justify-between">
-              ₹3,51,000
-              <IndianRupee className="h-5 w-5 text-emerald-600" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-slate-500">26 Invoices Settled (Cash + UPI)</p>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">Total Collected</p>
+                <p className="text-3xl font-bold text-emerald-700 mt-1">
+                  ₹{(totalCollectedAmt / 100000).toFixed(1)}L
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Today: ₹{todayCollectedAmt.toLocaleString("en-IN")}
+                </p>
+              </div>
+              <TrendingUp className="h-8 w-8 text-emerald-600" />
+            </div>
           </CardContent>
         </Card>
-
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs font-semibold uppercase">Overdue Balance</CardDescription>
-            <CardTitle className="text-2xl font-bold text-rose-600 flex items-center justify-between">
-              ₹1,89,000
-              <AlertCircle className="h-5 w-5 text-rose-500" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-slate-500">14 Invoices with dynamic daily late fees</p>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">Overdue Balance</p>
+                <p className="text-3xl font-bold text-rose-600 mt-1">
+                  ₹{(outstandingAmt / 100000).toFixed(1)}L
+                </p>
+                <p className="text-xs text-rose-600 mt-1">{overdueCount} Invoices overdue</p>
+              </div>
+              <AlertCircle className="h-8 w-8 text-rose-500" />
+            </div>
           </CardContent>
         </Card>
-
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs font-semibold uppercase">Billing Mode</CardDescription>
-            <CardTitle className="text-2xl font-bold text-slate-900 flex items-center justify-between">
-              Quarterly
-              <Receipt className="h-5 w-5 text-blue-700" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-slate-500">CBSE Standard (Apr, Jul, Oct, Jan)</p>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">Invoice Status</p>
+                <p className="text-3xl font-bold text-slate-900 mt-1">
+                  {paidInvoices}/{totalInvoices}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">Paid / Total</p>
+              </div>
+              <Receipt className="h-8 w-8 text-blue-600" />
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Step 4C: Pending Fee Package Setup Queue */}
-      <Card className="border-amber-200 bg-amber-50/10">
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base flex items-center gap-2">
-                <span>Pending Fee Structure Setup (Step 4C)</span>
-                <Badge variant="warning" className="text-[10px]">Action Required</Badge>
-              </CardTitle>
-              <CardDescription>
-                Assign fee category and generate initial billing invoice to activate student into school system.
-              </CardDescription>
-            </div>
-            <Badge variant="secondary">1 Student Waiting</Badge>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="rounded-[4px] border border-slate-200 bg-white overflow-hidden text-xs">
-            <div className="bg-slate-50 px-4 py-2 font-semibold text-slate-700 grid grid-cols-5 border-b border-slate-200">
-              <span>Admission No</span>
-              <span>Student Full Name</span>
-              <span>Assigned Class</span>
-              <span>Current Status</span>
-              <span>Fee Package Assignment</span>
-            </div>
-            <div className="px-4 py-3 grid grid-cols-5 items-center">
-              <span className="font-mono font-semibold text-blue-700">ADM-2026-092</span>
-              <span className="font-semibold text-slate-900">Pooja Malhotra</span>
-              <span className="text-slate-800 font-medium">Class 5 - Sec A (#26)</span>
-              <span>
-                <Badge variant="warning" className="text-[10px]">PENDING_FEE</Badge>
-              </span>
+      {/* Pending Fee Assignment */}
+      {pendingFeeStudents > 0 && (
+        <Card className="border-amber-200 bg-amber-50/10">
+          <CardHeader>
+            <div className="flex items-center justify-between">
               <div>
-                <form
-                  action={async (formData) => {
-                    "use server";
-                    await assignFeePackageAction(formData);
-                  }}
-                  className="flex items-center gap-2"
-                >
-                  <input type="hidden" name="studentId" value="ADM-2026-092" />
-                  <select
-                    name="feeStructureId"
-                    className="h-7 text-xs rounded-[4px] border border-slate-200 bg-white px-2 focus:border-blue-600"
-                  >
-                    <option value="fee-primary-qtr">Primary Standard (₹13,500/Qtr)</option>
-                    <option value="fee-primary-monthly">Primary Standard (₹4,500/Mo)</option>
-                  </select>
-                  <Button size="sm" type="submit" variant="success" className="h-7 text-xs px-2.5">
-                    Activate <CheckCircle2 className="h-3 w-3 ml-1" />
-                  </Button>
-                </form>
+                <CardTitle className="text-base">Pending Fee Structure Setup</CardTitle>
+                <CardDescription>Students awaiting fee package assignment</CardDescription>
               </div>
+              <Badge variant="warning">{pendingFeeStudents} Student{pendingFeeStudents !== 1 ? "s" : ""} Waiting</Badge>
             </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardHeader>
+        </Card>
+      )}
 
-      {/* Cash Desk Overview & Recent Transactions Table */}
+      {/* Recent Transactions */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle className="text-base">Recent Counter Transactions (Step 6)</CardTitle>
-              <CardDescription>
-                Immutable transaction vouchers generated with thermal receipt ready formatting.
-              </CardDescription>
+              <CardTitle className="text-base">Recent Counter Transactions</CardTitle>
+              <CardDescription>Latest fee collections</CardDescription>
             </div>
             <CashCollectionModal />
           </div>
         </CardHeader>
-        <CardContent>
-          <div className="rounded-[4px] border border-slate-200 overflow-hidden text-xs">
-            <div className="bg-slate-50 px-4 py-2 font-semibold text-slate-700 grid grid-cols-5 border-b border-slate-200">
-              <span>Receipt No</span>
-              <span>Student / Admission No</span>
-              <span>Payment Mode</span>
-              <span>Amount Paid</span>
-              <span>Status</span>
-            </div>
-            <div className="px-4 py-3 grid grid-cols-5 border-b border-slate-100 items-center">
-              <span className="font-mono font-semibold text-blue-700">RCP-2026-0001</span>
-              <span className="text-slate-800 font-medium">Aarav Sharma (ADM-1001)</span>
-              <div>
-                <Badge variant="default" className="text-[10px]">UPI (UTR verified)</Badge>
-              </div>
-              <span className="font-bold text-slate-900 font-mono">₹13,500.00</span>
-              <div>
-                <Badge variant="success" className="text-[10px]">SETTLED</Badge>
-              </div>
-            </div>
-            <div className="px-4 py-3 grid grid-cols-5 border-b border-slate-100 items-center">
-              <span className="font-mono font-semibold text-blue-700">RCP-2026-0002</span>
-              <span className="text-slate-800 font-medium">Ananya Iyer (ADM-1002)</span>
-              <div>
-                <Badge variant="secondary" className="text-[10px]">CASH ON DESK</Badge>
-              </div>
-              <span className="font-bold text-slate-900 font-mono">₹13,500.00</span>
-              <div>
-                <Badge variant="success" className="text-[10px]">SETTLED</Badge>
-              </div>
-            </div>
-            <div className="px-4 py-3 grid grid-cols-5 items-center">
-              <span className="font-mono font-semibold text-blue-700">RCP-2026-0003</span>
-              <span className="text-slate-800 font-medium">Vihaan Patel (ADM-1003)</span>
-              <div>
-                <Badge variant="outline" className="text-[10px]">BANK DRAFT (SBI)</Badge>
-              </div>
-              <span className="font-bold text-slate-900 font-mono">₹13,500.00</span>
-              <div>
-                <Badge variant="success" className="text-[10px]">SETTLED</Badge>
-              </div>
-            </div>
-          </div>
+        <CardContent className="p-0">
+          {recentTransactions.length === 0 ? (
+            <p className="p-6 text-center text-sm text-slate-500">No transactions recorded yet.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50 text-slate-700 font-semibold uppercase text-[11px] border-b border-slate-200">
+                  <th className="text-left py-3 px-4">Receipt No</th>
+                  <th className="text-left py-3 px-4">Student</th>
+                  <th className="text-center py-3 px-4">Method</th>
+                  <th className="text-right py-3 px-4">Amount</th>
+                  <th className="text-center py-3 px-4">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {recentTransactions.map((tx) => (
+                  <tr key={tx.id} className="hover:bg-slate-50/50">
+                    <td className="py-3 px-4 font-mono font-semibold text-blue-700">{tx.receiptNo}</td>
+                    <td className="py-3 px-4 text-slate-800">
+                      {tx.invoice.student.fullName} ({tx.invoice.student.admissionNo})
+                    </td>
+                    <td className="text-center py-3 px-4">
+                      <Badge
+                        variant={tx.paymentMethod === "UPI" ? "default" : tx.paymentMethod === "CASH" ? "secondary" : "outline"}
+                        className="text-[10px]"
+                      >
+                        {tx.paymentMethod}
+                      </Badge>
+                    </td>
+                    <td className="text-right py-3 px-4 font-mono font-bold text-slate-900">
+                      ₹{Number(tx.amountPaid).toLocaleString("en-IN")}
+                    </td>
+                    <td className="text-center py-3 px-4">
+                      <Badge variant="success" className="text-[10px]">SETTLED</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </CardContent>
       </Card>
     </div>

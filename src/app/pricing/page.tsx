@@ -14,8 +14,8 @@ import {
 } from "lucide-react";
 
 export const metadata = {
-  title: "Pricing Plans (INR ₹) | Skooltech SIS",
-  description: "Transparent, predictable pricing in Indian Rupees for CBSE, ICSE, and State Board K-12 schools.",
+  title: "Pricing | Skooltech SIS",
+  description: "Transparent, predictable pricing for CBSE, ICSE, and State Board K-12 schools.",
 };
 
 export default function PricingPage() {
@@ -60,7 +60,7 @@ export default function PricingPage() {
         {/* Title Header */}
         <div className="text-center max-w-3xl mx-auto space-y-3">
           <Badge variant="default" className="text-xs font-medium uppercase px-3 py-1">
-            Predictable Indian Rupee (₹) Pricing
+            Predictable Pricing
           </Badge>
           <h1 className="text-3xl sm:text-5xl font-bold tracking-tight text-slate-900">
             Simple, Transparent Plans for Every School
@@ -246,9 +246,9 @@ export default function PricingPage() {
               <tbody className="divide-y divide-slate-100">
                 <tr>
                   <td className="py-3 px-4 font-semibold text-slate-900">Currency & Financial System</td>
-                  <td className="py-3 px-4 text-center font-mono">INR (₹)</td>
-                  <td className="py-3 px-4 text-center font-mono text-blue-700 font-bold">INR (₹)</td>
-                  <td className="py-3 px-4 text-center font-mono font-bold">INR (₹)</td>
+                  <td className="py-3 px-4 text-center font-mono">₹</td>
+                  <td className="py-3 px-4 text-center font-mono text-blue-700 font-bold">₹</td>
+                  <td className="py-3 px-4 text-center font-mono font-bold">₹</td>
                 </tr>
                 <tr>
                   <td className="py-3 px-4 font-semibold text-slate-900">BYOG (Bring Your Own Gateway)</td>
@@ -332,7 +332,7 @@ export default function PricingPage() {
           <div className="flex items-center gap-2">
             <span className="font-bold text-slate-900">Skooltech SIS</span>
             <span>•</span>
-            <span>Currency: INR (₹)</span>
+            <span>All prices in Indian Rupees</span>
             <span>•</span>
             <span>CBSE / ICSE Compliant</span>
           </div>

@@ -12,6 +12,14 @@ generator client {
 // MODULE 1: TENANT CORE & ACADEMIC SESSIONS
 // =============================================================================
 
+enum SchoolStatus {
+  UNPAID
+  PAYMENT_PENDING
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+}
+
 model School {
   id             String   @id @default(uuid())
   code           String   @unique // e.g. "DPS01", "DEMO01"
@@ -24,6 +32,11 @@ model School {
   logoUrl        String?
   currency       String   @default("INR")
   gradingScale   String   @default("PERCENTAGE") // "PERCENTAGE", "CGPA_10", "CGPA_5"
+
+  // Subscription / platform access
+  status            SchoolStatus @default(UNPAID)
+  plan              String?
+  currentPeriodEnd  DateTime?
 
   // BYOG (Bring Your Own Gateway) Configuration
   paymentGateway String?  // "RAZORPAY", "CASHFREE", or "MOCK"
@@ -46,6 +59,11 @@ model School {
   leaveApplications   LeaveApplication[]
   notices             Notice[]
   auditLogs           AuditLog[]
+  attendanceDisputes  AttendanceDispute[]
+  timetables          Timetable[]
+  homework            Homework[]
+  lessonPlans         LessonPlan[]
+  transportDetails    TransportDetail[]
 
   @@map("schools")
 }
@@ -84,6 +102,7 @@ model User {
   id                 String   @id @default(uuid())
   schoolId           String
   username           String
+  fullName           String?
   passwordHash       String
   role               UserRole
   email              String?
@@ -103,6 +122,9 @@ model User {
   createdNotices     Notice[]            @relation("NoticesCreatedBy")
   auditLogs          AuditLog[]
   biometricMatches   BiometricPunch[]
+  createdHomework    Homework[]
+  createdLessonPlans LessonPlan[]
+  reviewedDisputes   AttendanceDispute[]
 
   @@unique([schoolId, username])
   @@index([schoolId, role])
@@ -149,6 +171,9 @@ model Section {
   class        Class        @relation(fields: [classId], references: [id], onDelete: Cascade)
   classTeacher Teacher?     @relation("ClassTeacherSection", fields: [classTeacherId], references: [id])
   enrollments  Enrollment[]
+  timetables   Timetable[]
+  homework     Homework[]
+  lessonPlans  LessonPlan[]
 
   @@unique([classId, name])
   @@map("sections")
@@ -174,6 +199,7 @@ model Student {
   fullName    String
   dob         DateTime?     @db.Date
   gender      String?
+  address     String?
   parentName  String?
   parentPhone String?
   parentEmail String?
@@ -184,6 +210,8 @@ model Student {
   enrollments Enrollment[]
   feeInvoices FeeInvoice[]
   leaves      LeaveApplication[]
+  disputes    AttendanceDispute[]
+  transport   TransportDetail?
 
   @@unique([schoolId, admissionNo])
   @@index([schoolId, status])
@@ -234,6 +262,7 @@ model Attendance {
   school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
   markedBy   User       @relation("AttendanceMarkedBy", fields: [markedById], references: [id])
+  disputes   AttendanceDispute[]
 
   @@unique([enrollmentId, date])
   @@index([schoolId, date])
@@ -283,6 +312,7 @@ model FeeStructure {
 
   school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
+  @@index([schoolId])
   @@map("fee_structures")
 }
 
@@ -303,6 +333,7 @@ model FeeInvoice {
 
   @@index([schoolId, isPaid])
   @@index([studentId, isPaid])
+  @@index([dueDate])
   @@map("fee_invoices")
 }
 
@@ -345,6 +376,7 @@ model Exam {
   createdBy User         @relation("ExamsCreatedBy", fields: [createdById], references: [id])
   results   ExamResult[]
 
+  @@index([schoolId, startDate])
   @@map("exams")
 }
 
@@ -373,23 +405,33 @@ model ExamResult {
 // MODULE 8: LEAVES, NOTICES & AUDIT TRAIL
 // =============================================================================
 
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model LeaveApplication {
-  id           String   @id @default(uuid())
+  id           String      @id @default(uuid())
   schoolId     String
   studentId    String
-  startDate    DateTime @db.Date
-  endDate      DateTime @db.Date
+  startDate    DateTime    @db.Date
+  endDate      DateTime    @db.Date
   reason       String
-  documentUrl  String?  // Cloud upload URL for medical cert
-  status       String   @default("PENDING") // "PENDING", "APPROVED", "REJECTED"
+  documentUrl  String?
+  status       LeaveStatus @default(PENDING)
+  remarks      String?     // Teacher/Principal review remarks
   reviewedById String?
-  createdAt    DateTime @default(now())
+  reviewedAt   DateTime?
+  createdAt    DateTime    @default(now())
 
   school     School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   student    Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
   reviewedBy User?   @relation("LeavesReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
 
   @@index([schoolId, status])
+  @@index([studentId])
+  @@index([schoolId, studentId])
   @@map("leave_applications")
 }
 
@@ -412,8 +454,8 @@ model Notice {
 model AuditLog {
   id         String   @id @default(uuid())
   schoolId   String
-  userId     String
-  userRole   String
+  userId     String?
+  userRole   String   @default("SYSTEM")
   action     String   // e.g. "FEE_COLLECTED", "MARKS_UPDATED"
   entityType String   // e.g. "payment_transactions"
   entityId   String
@@ -423,9 +465,135 @@ model AuditLog {
   createdAt  DateTime @default(now())
 
   school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, createdAt])
   @@index([entityType, entityId])
   @@map("audit_logs")
+}
+
+// =============================================================================
+// MODULE 9: ATTENDANCE DISPUTES, TIMETABLE, HOMEWORK & LESSON PLANS
+// =============================================================================
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+model AttendanceDispute {
+  id           String        @id @default(uuid())
+  schoolId     String
+  studentId    String
+  attendanceId String        @unique
+  disputedDate DateTime      @db.Date
+  reason       String
+  evidenceUrl  String?
+  status       DisputeStatus @default(OPEN)
+  reviewedById String?
+  resolution   String?
+  reviewedAt   DateTime?
+  createdAt    DateTime      @default(now())
+
+  school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  attendance Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  reviewedBy User?      @relation(fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, status])
+  @@index([studentId])
+  @@map("attendance_disputes")
+}
+
+model Timetable {
+  id         String   @id @default(uuid())
+  schoolId   String
+  sectionId  String
+  dayOfWeek  Int      // 0=Sunday, 1=Monday, ... 6=Saturday
+  periodNo   Int
+  subject    String
+  teacherId  String?
+  startTime  String   // e.g. "08:00"
+  endTime    String   // e.g. "08:45"
+  roomNo     String?
+  createdAt  DateTime @default(now())
+
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([sectionId, dayOfWeek, periodNo])
+  @@index([schoolId, dayOfWeek])
+  @@map("timetables")
+}
+
+model Homework {
+  id          String   @id @default(uuid())
+  schoolId    String
+  sectionId   String
+  subject     String
+  title       String
+  description String?
+  assignedDate DateTime @db.Date
+  dueDate     DateTime  @db.Date
+  createdById String
+  createdAt   DateTime  @default(now())
+
+  section   Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy User    @relation(fields: [createdById], references: [id])
+
+  @@index([schoolId, dueDate])
+  @@index([sectionId, subject])
+  @@map("homework")
+}
+
+model LessonPlan {
+  id          String   @id @default(uuid())
+  schoolId    String
+  sectionId   String
+  subject     String
+  weekStart   DateTime @db.Date
+  topics      String   // Comma-separated or JSON topics covered
+  activities  String?
+  resources   String?
+  objectives  String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  section   Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy User    @relation(fields: [createdById], references: [id])
+
+  @@unique([sectionId, subject, weekStart])
+  @@index([schoolId, weekStart])
+  @@map("lesson_plans")
+}
+
+// =============================================================================
+// MODULE 10: TRANSPORT (ARCHIVE / STUDENT SERVICES)
+// =============================================================================
+
+model TransportDetail {
+  id          String   @id @default(uuid())
+  schoolId    String
+  studentId   String   @unique
+  routeName   String?  // e.g. "Route A - North Gate"
+  vehicleNo   String?  // e.g. "DL 1PC 4521"
+  pickupPoint String?
+  dropPoint   String?
+  driverName  String?
+  driverPhone String?
+  monthlyFee  Decimal? @db.Decimal(10, 2)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
+  @@map("transport_details")
 }

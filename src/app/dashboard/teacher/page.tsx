@@ -1,232 +1,204 @@
 import { getSession } from "@/lib/auth";
-import { assignAcademicPlacementAction } from "@/actions/student.actions";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { isDatabaseConfigured } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
+import { DatabaseSetupNotice } from "@/components/shared/DatabaseSetupNotice";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { CheckCircle, Users, Clock, Check, UserPlus, ArrowRight, BookOpen, GraduationCap } from "lucide-react";
-import { AttendanceRollCall } from "@/components/attendance/AttendanceRollCall";
+import { Users, Check, UserPlus } from "lucide-react";
+import { AttendanceRollCall, type RosterStudent } from "@/components/attendance/AttendanceRollCall";
 import { CreateExamModal } from "@/components/teacher/CreateExamModal";
 import { MarksEntryModal } from "@/components/teacher/MarksEntryModal";
 import { LeaveReviewModal } from "@/components/teacher/LeaveReviewModal";
 
-export default async function TeacherDashboardPage() {
+export default async function TeacherOverviewPage() {
   const session = await getSession();
+  if (!session) return null;
+  if (!isDatabaseConfigured()) return <DatabaseSetupNotice />;
+
+  // Fetch teacher profile and managed section
+  const teacher = await prisma.teacher.findUnique({
+    where: { userId: session.userId },
+    include: {
+      managedSection: {
+        include: {
+          class: true,
+          enrollments: {
+            include: {
+              student: {
+                select: { fullName: true, admissionNo: true, status: true },
+              },
+            },
+            orderBy: { rollNo: "asc" },
+          },
+        },
+      },
+    },
+  });
+
+  const section = teacher?.managedSection;
+  const classLabel = section
+    ? `${section.class.name} - Section ${section.name}`
+    : "No section assigned";
+
+  // Build roster from real enrollments
+  const roster: RosterStudent[] =
+    section?.enrollments
+      .filter((e) => e.student.status === "ACTIVE")
+      .map((e) => ({
+        enrollmentId: e.id,
+        rollNo: e.rollNo || "—",
+        studentName: e.student.fullName,
+        admissionNo: e.student.admissionNo,
+      })) || [];
+
+  // Fetch today's attendance summary
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayAttendance = section
+    ? await prisma.attendance.findMany({
+        where: {
+          enrollmentId: { in: section.enrollments.map((e) => e.id) },
+          date: today,
+        },
+      })
+    : [];
+
+  const presentToday = todayAttendance.filter((a) => a.status === "PRESENT").length;
+  const absentToday = todayAttendance.filter((a) => a.status === "ABSENT").length;
+
+  // Fetch pending leave applications for this section's students
+  const pendingLeaves = section
+    ? await prisma.leaveApplication.findMany({
+        where: {
+          schoolId: session.schoolId,
+          status: "PENDING",
+          studentId: {
+            in: section.enrollments.map((e) => e.studentId),
+          },
+        },
+        include: { student: { select: { fullName: true, admissionNo: true } } },
+        orderBy: { createdAt: "desc" },
+      })
+    : [];
+
+  // Fetch pending admissions (students in PENDING_ACADEMIC status)
+  const pendingAdmissions = await prisma.student.count({
+    where: {
+      schoolId: session.schoolId,
+      status: "PENDING_ACADEMIC",
+    },
+  });
+
+  // Fetch pending fee assignments
+  const pendingFee = await prisma.student.count({
+    where: {
+      schoolId: session.schoolId,
+      status: "PENDING_FEE",
+    },
+  });
 
   return (
     <div className="space-y-6">
-      {/* Top Banner */}
       <div className="bg-white border border-slate-200 rounded-[4px] p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <Badge variant="default" className="text-xs uppercase font-medium">Teacher Portal</Badge>
-            <span className="text-xs text-slate-500 font-mono">Assigned Section: Class 5-A</span>
+            <Badge variant="default" className="text-xs uppercase">Teacher Portal</Badge>
+            <span className="text-xs text-slate-500 font-mono">{classLabel}</span>
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            Welcome, {session?.username}
+            Welcome, {session.username}
           </h1>
           <p className="text-sm text-slate-600 mt-0.5">
-            Your daily hub for morning roll-call, admissions placement, and CBSE exam grading.
+            {teacher?.fullName || session.username} — {classLabel}
           </p>
         </div>
-
         <div className="flex flex-wrap items-center gap-2">
           <CreateExamModal />
-          <MarksEntryModal />
+          <MarksEntryModal
+            examOptions={[]}
+            roster={roster}
+          />
         </div>
       </div>
 
-      {/* "My Class" Section Highlight */}
+      {/* Quick Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Card className="border-blue-200 bg-blue-50/20">
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs font-semibold uppercase text-blue-900">My Class</CardDescription>
-            <CardTitle className="text-2xl font-bold text-blue-900 flex items-center justify-between">
-              Class 5-A
-              <Users className="h-5 w-5 text-blue-700" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-slate-600">25 Enrolled Students (Roll 1 - 25)</p>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase text-blue-900">My Class</p>
+                <p className="text-3xl font-bold text-blue-900 mt-1">{classLabel}</p>
+                <p className="text-xs text-slate-600 mt-1">{roster.length} Active Students</p>
+              </div>
+              <Users className="h-8 w-8 text-blue-700" />
+            </div>
           </CardContent>
         </Card>
-
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs font-semibold uppercase">Today&apos;s Attendance</CardDescription>
-            <CardTitle className="text-2xl font-bold text-emerald-700 flex items-center justify-between">
-              23 / 25
-              <Check className="h-5 w-5 text-emerald-600" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-slate-500">2 Absent today (Notification sent via Brevo)</p>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">Today&apos;s Attendance</p>
+                <p className="text-3xl font-bold text-emerald-700 mt-1">
+                  {todayAttendance.length > 0 ? `${presentToday} / ${roster.length}` : "Not Marked"}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {absentToday > 0 ? `${absentToday} Absent` : todayAttendance.length > 0 ? "All Present" : "Roll call pending"}
+                </p>
+              </div>
+              <Check className="h-8 w-8 text-emerald-600" />
+            </div>
           </CardContent>
         </Card>
-
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs font-semibold uppercase">Pending Admissions</CardDescription>
-            <CardTitle className="text-2xl font-bold text-blue-700 flex items-center justify-between">
-              1 Queue
-              <UserPlus className="h-5 w-5 text-blue-700" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-slate-500">Step 4B: Awaiting academic placement</p>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">Pending Admissions</p>
+                <p className="text-3xl font-bold text-blue-700 mt-1">{pendingAdmissions} Queue</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {pendingFee > 0 ? `${pendingFee} awaiting fee` : "All placed"}
+                </p>
+              </div>
+              <UserPlus className="h-8 w-8 text-blue-600" />
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Step 4B: Pending Admissions Placement Queue */}
-      <Card className="border-blue-200 bg-blue-50/10">
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base flex items-center gap-2">
-                <span>Pending Admissions Queue (Step 4B)</span>
-                <Badge variant="default" className="text-[10px]">Action Required</Badge>
-              </CardTitle>
-              <CardDescription>
-                Assign class section and roll number for newly admitted student drafts created by Admin.
-              </CardDescription>
-            </div>
-            <Badge variant="secondary">1 Awaiting Assignment</Badge>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="rounded-[4px] border border-slate-200 bg-white overflow-hidden text-xs">
-            <div className="bg-slate-50 px-4 py-2 font-semibold text-slate-700 grid grid-cols-5 border-b border-slate-200">
-              <span>Admission No</span>
-              <span>Student Full Name</span>
-              <span>Parent Details</span>
-              <span>Current Status</span>
-              <span>Academic Assignment</span>
-            </div>
-            <div className="px-4 py-3 grid grid-cols-5 items-center">
-              <span className="font-mono font-semibold text-blue-700">ADM-2026-091</span>
-              <span className="font-semibold text-slate-900">Rohan Singhania</span>
-              <span className="text-slate-600">Vikram Singhania (+91 98222 33441)</span>
-              <span>
-                <Badge variant="default" className="text-[10px]">PENDING_ACADEMIC</Badge>
-              </span>
+      {/* Pending Admission */}
+      {pendingAdmissions > 0 && (
+        <Card className="border-blue-200 bg-blue-50/10">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
               <div>
-                <form
-                  action={async (formData) => {
-                    "use server";
-                    await assignAcademicPlacementAction(formData);
-                  }}
-                  className="flex items-center gap-2"
-                >
-                  <input type="hidden" name="studentId" value="ADM-2026-091" />
-                  <input type="hidden" name="sectionId" value="section-5a" />
-                  <input
-                    name="rollNo"
-                    defaultValue="26"
-                    placeholder="Roll #"
-                    className="h-7 w-16 px-2 text-xs rounded-[4px] border border-slate-200 font-mono text-center"
-                    required
-                  />
-                  <Button size="sm" type="submit" className="h-7 text-xs px-2.5">
-                    Assign to 5-A <ArrowRight className="h-3 w-3 ml-1" />
-                  </Button>
-                </form>
+                <h3 className="font-bold text-sm text-blue-900">Pending Admissions ({pendingAdmissions})</h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Students in PENDING_ACADEMIC status need class placement
+                </p>
               </div>
+              <Badge variant="default">{pendingAdmissions} Awaiting</Badge>
             </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
-      {/* Step 8: Student Leave Approvals Hub */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center justify-between">
-            <span>Student Leave Requests (Step 8)</span>
-            <Badge variant="outline" className="text-xs">Class 5-A Hub</Badge>
-          </CardTitle>
-          <CardDescription>
-            Review pending student leave applications, verify medical certificates, and grant authorized absences.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <LeaveReviewModal />
-        </CardContent>
-      </Card>
+      {/* Leave Review */}
+      <LeaveReviewModal
+        leaves={pendingLeaves.map((l) => ({
+          id: l.id,
+          studentName: l.student.fullName,
+          admissionNo: l.student.admissionNo,
+          startDate: l.startDate.toISOString().split("T")[0],
+          endDate: l.endDate.toISOString().split("T")[0],
+          reason: l.reason,
+          category: l.reason.startsWith("[") ? l.reason.slice(1, l.reason.indexOf("]")) : "GENERAL",
+        }))}
+      />
 
-      {/* Step 7: Examination & Marks Evaluation Hub */}
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <CardTitle className="text-base flex items-center gap-2">
-                <BookOpen className="h-4 w-4 text-blue-700" />
-                <span>Class 5-A Examinations & Grading Hub (Step 7)</span>
-                <Badge variant="default" className="text-[10px]">CBSE 9-Point Scale</Badge>
-              </CardTitle>
-              <CardDescription>
-                Schedule spontaneous tests, evaluate raw marks matrix, and calculate student percentiles and CGPA.
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <CreateExamModal />
-              <MarksEntryModal />
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-4 rounded-[4px] border border-slate-200 bg-slate-50 space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold text-slate-900 text-sm">Periodic Test 1 (PT-1)</h4>
-                  <p className="text-xs text-slate-500">Unit Test • Commenced May 15, 2026</p>
-                </div>
-                <Badge variant="success" className="text-[10px]">Published</Badge>
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                <div className="bg-white p-2 rounded-[4px] border border-slate-200">
-                  <span className="text-slate-500 block text-[10px]">Subjects</span>
-                  <span className="font-bold text-slate-900">5 / 5</span>
-                </div>
-                <div className="bg-white p-2 rounded-[4px] border border-slate-200">
-                  <span className="text-slate-500 block text-[10px]">Evaluated</span>
-                  <span className="font-bold text-emerald-700">25 Students</span>
-                </div>
-                <div className="bg-white p-2 rounded-[4px] border border-slate-200">
-                  <span className="text-slate-500 block text-[10px]">Class Avg</span>
-                  <span className="font-bold text-blue-700">88.4%</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-4 rounded-[4px] border border-slate-200 bg-slate-50 space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold text-slate-900 text-sm">Unit Test 2 (Algebra & Mechanics)</h4>
-                  <p className="text-xs text-slate-500">Class Test • Scheduled for Upcoming Week</p>
-                </div>
-                <Badge variant="outline" className="text-[10px]">Draft / Open</Badge>
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                <div className="bg-white p-2 rounded-[4px] border border-slate-200">
-                  <span className="text-slate-500 block text-[10px]">Max Marks</span>
-                  <span className="font-bold text-slate-900">40 Marks</span>
-                </div>
-                <div className="bg-white p-2 rounded-[4px] border border-slate-200">
-                  <span className="text-slate-500 block text-[10px]">Status</span>
-                  <span className="font-bold text-amber-700">Awaiting Marks</span>
-                </div>
-                <div className="bg-white p-2 rounded-[4px] border border-slate-200">
-                  <span className="text-slate-500 block text-[10px]">Target</span>
-                  <span className="font-bold text-slate-700">Class 5-A</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Interactive Morning Roll-Call Ledger (Step 5) */}
-      <AttendanceRollCall />
+      {/* Attendance Roll Call */}
+      <AttendanceRollCall roster={roster} classLabel={classLabel} />
     </div>
   );
 }

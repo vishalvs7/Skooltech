@@ -33,6 +33,8 @@ async function main() {
       email: "principal@greenwoodschool.edu.in",
       currency: "INR",
       gradingScale: "PERCENTAGE",
+      status: "ACTIVE",
+      plan: "PRO",
       paymentGateway: "MOCK",
       paymentKeyId: "rzp_test_greenwood_demo",
       paymentSecret: "mock_secret_enc_greenwood",

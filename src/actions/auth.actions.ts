@@ -18,16 +18,6 @@ export interface ActionResponse {
   error?: string;
 }
 
-// Fallback deterministic sandbox users for local offline testing
-const DEMO_USERS: Record<string, { role: UserRoleType; name: string; mustChange: boolean }> = {
-  admin_demo: { role: "SCHOOL_ADMIN", name: "Greenwood Administrator", mustChange: false },
-  principal_demo: { role: "PRINCIPAL", name: "Dr. K. S. Mukherjee", mustChange: false },
-  accounts_demo: { role: "ACCOUNTS", name: "Accounts Office", mustChange: false },
-  teacher_sharma: { role: "TEACHER", name: "Mr. Rajesh Sharma (Class 5-A)", mustChange: false },
-  "ADM-1001": { role: "STUDENT", name: "Aarav Sharma", mustChange: false },
-  new_student_demo: { role: "STUDENT", name: "First-Time Student", mustChange: true },
-};
-
 export async function loginAction(
   prevState: ActionResponse | null,
   formData: FormData
@@ -43,7 +33,6 @@ export async function loginAction(
   let sessionPayload: SessionPayload | null = null;
 
   try {
-    // 1. Attempt Database Lookup
     const school = await prisma.school.findUnique({
       where: { code: schoolCode },
     });
@@ -73,26 +62,9 @@ export async function loginAction(
         }
       }
     }
-  } catch {
-    console.warn("Database lookup failed or not connected, attempting Sandbox DEMO01 fallback...");
-  }
-
-  // 2. Sandbox DEMO01 Fallback (for instant local development testing)
-  if (!sessionPayload && schoolCode === "DEMO01") {
-    const demoUser = DEMO_USERS[username];
-    const isDefaultPassword = password === "DemoPass@123" || password === "Student@123";
-
-    if (demoUser && isDefaultPassword) {
-      sessionPayload = {
-        userId: `demo-user-${username}`,
-        schoolId: "demo-school-greenwood-001",
-        schoolCode: "DEMO01",
-        schoolName: "Greenwood International School",
-        username: username,
-        role: demoUser.role,
-        mustChangePassword: demoUser.mustChange,
-      };
-    }
+  } catch (error) {
+    console.error("Login database lookup failed:", error);
+    return { success: false, error: "Authentication service is temporarily unavailable. Please try again." };
   }
 
   if (!sessionPayload) {

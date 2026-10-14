@@ -11,16 +11,13 @@ export interface LeaveActionResponse {
   error?: string;
 }
 
-/**
- * STEP 8: Student or Parent submits a Leave Application
- */
 export async function applyStudentLeaveAction(
   prevState: LeaveActionResponse | null,
   formData: FormData
 ): Promise<LeaveActionResponse> {
   const session = await getSession();
-  if (!session) {
-    return { success: false, error: "Unauthorized. Please log in to apply for leave." };
+  if (!session || session.role !== "STUDENT") {
+    return { success: false, error: "Unauthorized. Only students can submit leave applications." };
   }
 
   const startDateStr = (formData.get("startDate") as string)?.trim();
@@ -40,34 +37,21 @@ export async function applyStudentLeaveAction(
     return { success: false, error: "End date cannot be earlier than start date." };
   }
 
+  if (endDate.getTime() - startDate.getTime() > 30 * 24 * 60 * 60 * 1000) {
+    return { success: false, error: "Leave duration cannot exceed 30 days." };
+  }
+
   try {
-    // Locate student profile for current user
-    let student = await prisma.student.findFirst({
+    // Find student profile — strictly scoped to session user + school
+    const student = await prisma.student.findFirst({
       where: {
         schoolId: session.schoolId,
         userId: session.userId,
       },
     });
 
-    // If session is an admin/parent submitting for demo student
     if (!student) {
-      student = await prisma.student.findFirst({
-        where: {
-          schoolId: session.schoolId,
-          admissionNo: session.username,
-        },
-      });
-    }
-
-    // Fallback to first student for sandbox demo if needed
-    if (!student) {
-      student = await prisma.student.findFirst({
-        where: { schoolId: session.schoolId },
-      });
-    }
-
-    if (!student) {
-      return { success: false, error: "Active student profile not found." };
+      return { success: false, error: "No active student profile linked to your account. Contact your school admin." };
     }
 
     const fullReason = `[${category}] ${reasonText}`;
@@ -79,12 +63,11 @@ export async function applyStudentLeaveAction(
         startDate,
         endDate,
         reason: fullReason,
-        documentUrl: documentUrl || "/uploads/mock-medical-slip.pdf",
+        documentUrl: documentUrl || null,
         status: "PENDING",
       },
     });
 
-    // Audit log
     await recordAuditLog({
       schoolId: session.schoolId,
       userId: session.userId,
@@ -113,9 +96,6 @@ export async function applyStudentLeaveAction(
   }
 }
 
-/**
- * STEP 8: Class Teacher or Principal Approves / Rejects a Leave Application
- */
 export async function reviewLeaveAction(
   prevState: LeaveActionResponse | null,
   formData: FormData
@@ -137,15 +117,26 @@ export async function reviewLeaveAction(
   }
 
   try {
-    const existingLeave = await prisma.leaveApplication.findUnique({
-      where: { id: leaveId },
+    // Fetch leave scoped to school (tenant isolation)
+    const existingLeave = await prisma.leaveApplication.findFirst({
+      where: {
+        id: leaveId,
+        schoolId: session.schoolId,
+      },
       include: {
         student: true,
       },
     });
 
     if (!existingLeave) {
-      return { success: false, error: "Leave application record not found." };
+      return { success: false, error: "Leave application record not found in your school." };
+    }
+
+    if (existingLeave.status !== "PENDING") {
+      return {
+        success: false,
+        error: `This leave application has already been ${existingLeave.status.toLowerCase()}. Cannot re-review.`,
+      };
     }
 
     await prisma.leaveApplication.update({
@@ -153,10 +144,11 @@ export async function reviewLeaveAction(
       data: {
         status,
         reviewedById: session.userId,
+        remarks: teacherRemarks || null,
+        reviewedAt: new Date(),
       },
     });
 
-    // Immutable Audit Log
     await recordAuditLog({
       schoolId: session.schoolId,
       userId: session.userId,
